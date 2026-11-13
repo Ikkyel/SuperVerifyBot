@@ -330,7 +330,7 @@ async def send_ban_log(bot, store, owner_id: int, html_text: str, kind: str = "g
     except Exception as exc:
         log.warning("Kirim log ban HTML gagal: %s — coba teks polos.", exc)
         try:
-            plain = re.sub(r"</?[a-z]+>", "", html_text)
+            plain = re.sub(r"<[^>]+>", "", html_text)
             await bot.send_message(text=plain, parse_mode=None, **base)
             return True
         except Exception as exc2:
@@ -343,7 +343,7 @@ def _user_block(store, user_id: int) -> str:
     user = store.get_user(user_id) or {}
     lines = [
         "📋 <b>Data member:</b>",
-        f"👤 Nama: {_esc(user.get('name') or '-')}",
+        f"👤 Nama: {_profile_anchor(user_id, user.get('name') or '-')}",
         f"🔗 Username: {_esc(display_username(user.get('username')))}",
         f"🆔 ID: <code>{user_id}</code>",
         f"📱 Nomor HP: {_esc(user.get('phone') or '-')}",
@@ -646,6 +646,9 @@ def _plain_markdown(text: str) -> str:
     out = str(text)
     for esc in ("\\_", "\\*", "\\`", "\\["):
         out = out.replace(esc, esc[1])
+    # Tautan sebutan [nama](tg://user?id=...) -> sisakan namanya saja,
+    # supaya versi polosnya bersih dibaca (bukan sintaks mentah).
+    out = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", out)
     return out.replace("*", "")
 
 
@@ -724,6 +727,16 @@ def _esc(value) -> str:
     return html.escape(str(value), quote=False)
 
 
+def _profile_anchor(user_id: int, name) -> str:
+    """Nama user sebagai tautan yang bisa di-tap menuju profilnya, berbasis
+    ID (tg://user?id=...) — jalan juga untuk user TANPA username, yang
+    memang tidak punya alamat t.me/<username>. Menurut dokumentasi Bot API,
+    tautan sebutan ini dijamin berfungsi bila user pernah menghubungi bot
+    (semua user yang terverifikasi / pernah DM bot pasti memenuhi ini) atau
+    sedang jadi member di chat tempat pesan itu tampil."""
+    return f'<a href="tg://user?id={int(user_id)}">{_esc(name or "-")}</a>'
+
+
 def build_log_text(store, user_id: int, target: dict, event_label: str,
                    source: str, ts: float) -> str:
     # HTML, BUKAN Markdown: format riwayat memakai "[DD/MM/YY ...]" yang oleh
@@ -733,7 +746,7 @@ def build_log_text(store, user_id: int, target: dict, event_label: str,
     lines = [
         f"✅ <b>{_esc(event_label)}</b>",
         "",
-        f"👤 Nama: {_esc(user.get('name') or '-')}",
+        f"👤 Nama: {_profile_anchor(user_id, user.get('name') or '-')}",
         f"🔗 Username: {_esc(display_username(user.get('username')))}",
         f"🆔 ID: <code>{user_id}</code>",
         f"📱 Nomor HP: {_esc(user.get('phone') or '(belum ada)')}",
@@ -778,7 +791,7 @@ async def send_log(bot, store, owner_id: int, user_id: int, target: dict,
         # Target BELUM punya topik sendiri: log-nya DITAMPUNG, bukan dikirim
         # sebagai pesan — nanti dikeluarkan sebagai satu file .txt ke General
         # grup log (perintah /logfile, atau otomatis tiap 100 catatan).
-        plain = re.sub(r"</?(b|code)>", "", text)
+        plain = re.sub(r"<[^>]+>", "", text)
         store.add_unpaired_log({
             "ts": ts, "user_id": user_id, "target_id": target.get("_id"),
             "target_title": target.get("title") or str(target.get("_id")),
@@ -836,7 +849,7 @@ async def send_log(bot, store, owner_id: int, user_id: int, target: dict,
         # Jangan sampai log hilang gara-gara format: coba ulang sebagai teks polos.
         log.warning("Kirim log HTML gagal untuk %s: %s — coba teks polos.", user_id, exc)
         try:
-            plain = re.sub(r"</?(b|code)>", "", text)
+            plain = re.sub(r"<[^>]+>", "", text)
             await _do_send(plain, None)
             sent = True
         except Exception as exc2:
@@ -1040,7 +1053,14 @@ async def handle_direct_join(bot, store, owner_id: int, chat, user,
         deep = f"https://t.me/{bot_username}?start=verify" if bot_username else None
         markup = (InlineKeyboardMarkup([[InlineKeyboardButton("✅ Verifikasi Sekarang", url=deep)]])
                   if deep else None)
-        mention = _md_escape(f"@{user.username}" if getattr(user, "username", None) else full_name_of(user))
+        if getattr(user, "username", None):
+            mention = _md_escape(f"@{user.username}")
+        else:
+            # Tanpa username, namanya dibuat tautan sebutan berbasis ID —
+            # bisa di-tap menuju profilnya (dia member grup ini, jadi
+            # tautan jenis ini dijamin Telegram berfungsi di sini).
+            mention = (f"[{_md_escape(full_name_of(user))}]"
+                       f"(tg://user?id={user.id})")
         group_text = (f"Halo {mention} 👋 Kamu baru bergabung dan sementara *dibatasi* dulu.\n"
                       f"Selesaikan verifikasi nomor HP lewat tombol di bawah sebelum "
                       f"*{_now_str(deadline)}* — kalau lewat, kamu akan dikeluarkan dari grup ini.")

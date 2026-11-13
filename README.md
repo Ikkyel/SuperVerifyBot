@@ -100,6 +100,7 @@ User yang membuka bot tanpa link gerbang (`/start` biasa) ditawari daftar target
 - Share nomor **cukup satu kali** di DM bot; semua pending (join request + grup yang dibatasi) diselesaikan barengan dan log dikirim per target ke topiknya masing-masing.
 - Nomor yang dikirim **wajib nomor akun itu sendiri** — Telegram menandai pemilik contact, dan bot menolak nomor orang lain.
 - User yang sudah terverifikasi: join request langsung di-approve, join langsung ke grup tidak dibatasi — cukup dicatat & dilog sebagai "sudah terverifikasi".
+- Nama member di pesan log verifikasi, laporan ban, dan daftar `/daftarban` **bisa di-tap untuk membuka profilnya** — termasuk member yang **tidak punya username**, karena bot menautkan namanya berbasis ID (`tg://user?id=...`), dan nama member baru di pesan verifikasi grup juga begitu bila dia tanpa username. Batasan Telegram: tautan profil ini dijamin jalan bila usernya pernah menghubungi bot (semua user terverifikasi pasti pernah) atau sedang jadi member di chat tempat pesan itu tampil; untuk ID yang belum pernah berinteraksi sama sekali (mis. ID asing dari daftar ban pribadi owner), tautannya mungkin tidak terbuka — ID-nya tetap tercantum persis untuk dipakai perintah `/ban` / `/unban`.
 
 ### 9. Checklist tes pakai akun kedua
 Sebelum dipakai beneran, tes dulu pakai akun Telegram kedua (bukan akun owner):

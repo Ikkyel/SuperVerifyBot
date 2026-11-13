@@ -512,7 +512,10 @@ async def daftarban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"🚫 *User terblokir ({len(banned)}):*"]
     for u in banned:
         uname = f" @{u['username']}" if u.get("username") else ""
-        lines.append(f"• {u.get('name') or '-'} (`{u['_id']}`){uname}")
+        # Nama dibuat tautan sebutan berbasis ID: bisa di-tap menuju
+        # profilnya, termasuk user yang tidak punya username.
+        label = service._md_escape(u.get('name') or '-')
+        lines.append(f"• [{label}](tg://user?id={u['_id']}) (`{u['_id']}`){uname}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
