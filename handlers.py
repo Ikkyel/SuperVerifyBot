@@ -204,7 +204,9 @@ HELP_TEXT = (
     "dan datanya tercatat di topik log target masing-masing.\n"
     "4. Batas waktu verifikasi: 30 detik per target. Lewat batas → request ditolak / "
     "member dikeluarkan.\n"
-    "5. Member yang keluar sendiri dari target otomatis di-ban dari target itu.\n\n"
+    "5. Member yang keluar sendiri dari target otomatis di-ban dari target itu.\n"
+    "6. Pesan verifikasi yang bot kirim di dalam grup otomatis terhapus begitu "
+    "verifikasinya selesai atau waktunya habis, biar grup tidak penuh.\n\n"
     "_Daftarkan link invite mentah sebuah target: kirim link-nya ke chat pribadi bot, "
     "bot akan membalas link gerbangnya._"
 )

@@ -157,8 +157,10 @@ async def ban_user(bot, store, user_id: int):
     Mengembalikan daftar (target_doc, ok, error_str) hasil perambatan.
     """
     store.set_banned(user_id, True)
-    # Batalkan pending apa pun miliknya supaya tidak ada yang menyelesaikannya.
-    store.clear_pendings(user_id)
+    # Batalkan pending apa pun miliknya supaya tidak ada yang menyelesaikannya,
+    # dan hapus pesan verifikasi grup milik pending itu sekalian.
+    for cleared in store.clear_pendings(user_id) or []:
+        await _delete_prompt_message(bot, cleared)
     results = []
     for target in store.list_targets():
         if target["_id"] == store.get_setting("log_group_id"):
@@ -441,6 +443,17 @@ async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = 
     store.record_encounter(user.id, full_name_of(user), getattr(user, "username", None),
                            ts=ts, is_premium=getattr(user, "is_premium", None),
                            language_code=getattr(user, "language_code", None))
+    # Kalau dia keluar di tengah verifikasi grup, pesan verifikasinya di
+    # grup itu sudah tidak berguna: hapus, dan pending-nya ditutup (dia
+    # sudah di-ban dari target ini, tidak ada lagi yang perlu ditunggu).
+    try:
+        for pending in store.list_pendings(user.id):
+            if pending.get("chat_id") == chat.id:
+                await _delete_prompt_message(bot, pending)
+                store.remove_pending(user.id, chat.id)
+    except Exception as exc:
+        log.debug("Bersihkan pending saat %s keluar dari %s gagal: %s",
+                  user.id, chat.id, exc)
     store.mark_left_ban(user.id, chat.id, ts)
     try:
         await bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
@@ -623,13 +636,83 @@ def _md_escape(text) -> str:
     return out
 
 
+def _plain_markdown(text: str) -> str:
+    """Bersihkan format Markdown dari sebuah teks untuk pengiriman darurat
+    sebagai teks polos (tanpa parse_mode).
+
+    Dipakai bila Telegram menolak pesan Markdown ("Can't parse entities")
+    karena nama/judul user mengandung karakter yang lolos dari _md_escape —
+    pesannya tetap sampai (beserta tombolnya), hanya tanpa huruf tebal."""
+    out = str(text)
+    for esc in ("\\_", "\\*", "\\`", "\\["):
+        out = out.replace(esc, esc[1])
+    return out.replace("*", "")
+
+
+def _is_parse_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "parse" in msg or "entities" in msg
+
+
 async def _send_dm(bot, chat_id, text, **kwargs):
     try:
         await bot.send_message(chat_id=chat_id, text=text, **kwargs)
         return True
     except Exception as exc:  # user memblokir bot, dsb. — jangan jatuhkan handler
         log.warning("Gagal kirim DM ke %s: %s", chat_id, exc)
+        if _is_parse_error(exc) and kwargs.get("parse_mode"):
+            # Gagal format, bukan gagal kirim: coba lagi sebagai teks polos
+            # supaya prompt verifikasi tetap sampai (tombol ikut terkirim).
+            try:
+                plain_kwargs = {k: v for k, v in kwargs.items()
+                                if k != "parse_mode"}
+                await bot.send_message(chat_id=chat_id,
+                                       text=_plain_markdown(text),
+                                       **plain_kwargs)
+                log.info("DM ke %s terkirim sebagai teks polos "
+                         "(Markdown ditolak Telegram).", chat_id)
+                return True
+            except Exception as exc2:
+                log.warning("Gagal kirim DM teks polos ke %s: %s", chat_id, exc2)
         return False
+
+
+async def _delete_prompt_message(bot, pending):
+    """Hapus pesan verifikasi yang bot kirim di grup sebuah target (jalur B).
+
+    Best-effort: pesan memang cuma 'sampah' sesudah verifikasinya beres —
+    gagal hapus (pesan sudah hilang, bot kehilangan hak hapus, bot stub
+    tanpa delete_message) tidak boleh menggagalkan proses utamanya.
+    """
+    if not pending:
+        return
+    message_id = pending.get("prompt_message_id")
+    chat_id = pending.get("chat_id")
+    if not message_id or not chat_id:
+        return
+    delete = getattr(bot, "delete_message", None)
+    if delete is None:
+        return
+    try:
+        await delete(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        log.debug("Gagal hapus pesan verifikasi grup %s/%s: %s",
+                  chat_id, message_id, exc)
+
+
+async def _remember_prompt_message(store, user_id: int, chat_id: int, message):
+    """Catat message_id pesan verifikasi grup ke pending-nya di DB."""
+    message_id = getattr(message, "message_id", None) if message else None
+    if not message_id:
+        return
+    setter = getattr(store, "set_pending_prompt", None)
+    if setter is None:
+        return
+    try:
+        setter(user_id, chat_id, message_id)
+    except Exception as exc:
+        log.debug("Gagal catat message_id prompt %s/%s: %s",
+                  user_id, chat_id, exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -958,16 +1041,35 @@ async def handle_direct_join(bot, store, owner_id: int, chat, user,
         markup = (InlineKeyboardMarkup([[InlineKeyboardButton("✅ Verifikasi Sekarang", url=deep)]])
                   if deep else None)
         mention = _md_escape(f"@{user.username}" if getattr(user, "username", None) else full_name_of(user))
-        try:
-            await bot.send_message(
-                chat_id=chat.id,
-                text=(f"Halo {mention} 👋 Kamu baru bergabung dan sementara *dibatasi* dulu.\n"
+        group_text = (f"Halo {mention} 👋 Kamu baru bergabung dan sementara *dibatasi* dulu.\n"
                       f"Selesaikan verifikasi nomor HP lewat tombol di bawah sebelum "
-                      f"*{_now_str(deadline)}* — kalau lewat, kamu akan dikeluarkan dari grup ini."),
+                      f"*{_now_str(deadline)}* — kalau lewat, kamu akan dikeluarkan dari grup ini.")
+        sent_msg = None
+        try:
+            sent_msg = await bot.send_message(
+                chat_id=chat.id,
+                text=group_text,
                 parse_mode="Markdown", reply_markup=markup,
             )
         except Exception as exc:
             log.warning("Gagal kirim pesan verifikasi grup %s: %s", chat.id, exc)
+            if _is_parse_error(exc):
+                # Gagal format, bukan gagal kirim: coba lagi sebagai teks polos.
+                try:
+                    sent_msg = await bot.send_message(
+                        chat_id=chat.id,
+                        text=_plain_markdown(group_text),
+                        reply_markup=markup,
+                    )
+                    log.info("Pesan verifikasi grup %s terkirim sebagai teks polos "
+                             "(Markdown ditolak Telegram).", chat.id)
+                except Exception as exc2:
+                    log.warning("Gagal kirim pesan verifikasi grup teks polos %s: %s",
+                                chat.id, exc2)
+        # Catat message_id-nya: pesan ini dihapus otomatis begitu verifikasi
+        # user ini selesai / kedaluwarsa / dibatalkan (lihat
+        # complete_verification & expire_pendings), biar grup tidak penuh.
+        await _remember_prompt_message(store, user.id, chat.id, sent_msg)
     else:
         # Channel tidak punya pesan publik per-user. Coba DM prompt verifikasi:
         # terkirim hanya bila user pernah Start bot (mis. diarahkan dari
@@ -1029,6 +1131,9 @@ async def complete_verification(bot, store, owner_id: int, user, ts: float = Non
             done.append(chat_id)
         except Exception as exc:
             log.warning("Gagal selesaikan pending %s/%s: %s", user.id, chat_id, exc)
+        # Verifikasinya beres untuk target ini: pesan verifikasi di grupnya
+        # (kalau ada) dihapus otomatis supaya grup bersih.
+        await _delete_prompt_message(bot, pending)
         store.remove_pending(user.id, chat_id)
     # Tujuan dari link gerbang: sesudah verifikasi lolos, langsung kirim
     # tombol masuk ke target yang dia tuju.
@@ -1081,6 +1186,9 @@ async def expire_pendings(bot, store, owner_id: int, now: float = None):
                             user_id, chat_id, exc)
                 continue
             processed.append((user_id, chat_id, kind))
+            # Waktunya habis & user sudah ditendang/ditolak: pesan verifikasi
+            # di grupnya dihapus otomatis juga, jangan jadi sampah di grup.
+            await _delete_prompt_message(bot, pending)
             store.remove_pending(user_id, chat_id)
             any_done = True
         if any_done:

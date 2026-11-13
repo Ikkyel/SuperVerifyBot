@@ -317,6 +317,18 @@ class Store:
                                   {"$set": {"deadline": deadline}})
         return deadline
 
+    def set_pending_prompt(self, user_id: int, chat_id: int, message_id: int):
+        """Simpan message_id pesan verifikasi yang bot kirim DI GRUP target
+        (jalur B grup), supaya pesan itu bisa dihapus otomatis begitu
+        verifikasinya selesai / kedaluwarsa — grup tidak penuh dengan
+        pesan-pesan verifikasi sisa. Disimpan di DB (bukan memori) supaya
+        tetap bisa dihapus walau bot sempat restart di tengah jalan."""
+        if not message_id:
+            return
+        self.pendings.update_one(
+            {"_id": f"{int(user_id)}:{int(chat_id)}"},
+            {"$set": {"prompt_message_id": int(message_id)}})
+
     def list_pendings(self, user_id: int = None):
         query = {} if user_id is None else {"user_id": int(user_id)}
         return list(self.pendings.find(query))

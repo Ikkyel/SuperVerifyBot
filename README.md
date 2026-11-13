@@ -82,7 +82,7 @@ Buat satu topik khusus di grup log (mis. "Log Ban"), buka topiknya, lalu kirim *
 
 **Jalur B (kasus bot fsub/file sharing):**
 Bot fsub biasanya **membuat link-nya sendiri secara otomatis** dan link itu tipe langsung masuk — tidak bisa diganti dari luar. Tidak apa-apa, tetap pakai link itu:
-- Kalau targetnya **grup**: user masuk → bot verifikasi langsung membatasi dia → dia wajib verifikasi nomor HP lewat tombol yang bot kirim di grup sebelum batas waktu habis → selesai verifikasi, batasan dibuka; tidak verifikasi, dia dikeluarkan. Sesudah itu dia balik ke bot fsub dan cek join seperti biasa (status membernya sudah sah).
+- Kalau targetnya **grup**: user masuk → bot verifikasi langsung membatasi dia → dia wajib verifikasi nomor HP lewat tombol yang bot kirim di grup sebelum batas waktu habis → selesai verifikasi, batasan dibuka; tidak verifikasi, dia dikeluarkan. Sesudah itu dia balik ke bot fsub dan cek join seperti biasa (status membernya sudah sah). **Pesan verifikasi bot di grup itu otomatis terhapus** begitu verifikasinya selesai atau waktunya habis (juga bila membernya keluar / di-ban di tengah jalan), jadi grup tidak penuh dengan pesan-pesan verifikasi sisa; ID pesannya dicatat di database, jadi penghapusan tetap jalan walau bot sempat restart.
 - Kalau targetnya **channel**: bot verifikasi berusaha mencatat join langsungnya dan memberi deadline yang sama; user verifikasi lewat link bot yang kamu tempel di channel (mis. di pesan tersemat: "Member baru wajib verifikasi di sini: t.me/<usernamebotkamu>"). Lewat deadline → dikeluarkan.
 
 **Jalur Gerbang (link kombinasi bot — disarankan untuk link yang kamu sebar sendiri):**
@@ -108,7 +108,7 @@ Sebelum dipakai beneran, tes dulu pakai akun Telegram kedua (bukan akun owner):
 - [ ] Share nomor pakai nomor akun kedua itu → join request **otomatis ter-approve**, log lengkap + blok riwayat muncul di **topik yang benar** di grup log (dengan foto profil bila ada)
 - [ ] Ulangi tapi **jangan verifikasi** → sesudah deadline (≈30 detik × jumlah pending) permintaan **ditolak** otomatis
 - [ ] Coba kirim contact **nomor orang lain** (share contact dari daftar kontak) → bot **menolak** dan minta nomor sendiri
-- [ ] Akun kedua join ke **grup** target lewat link langsung → langsung **tidak bisa kirim pesan**, ada pesan bot + tombol verifikasi; selesai verifikasi → bisa kirim pesan lagi
+- [ ] Akun kedua join ke **grup** target lewat link langsung → langsung **tidak bisa kirim pesan**, ada pesan bot + tombol verifikasi; selesai verifikasi → bisa kirim pesan lagi **dan pesan verifikasi bot di grup otomatis terhapus** (juga terhapus bila waktunya habis dan akun dikeluarkan)
 - [ ] Biarkan satu akun/uji lain lewat deadline di grup → **dikeluarkan** otomatis (masih bisa join lagi nanti)
 - [ ] Akun yang **sudah terverifikasi** join target lain → langsung lolos, tidak dibatasi, tidak diminta nomor lagi
 - [ ] Ganti nama/username akun kedua, lalu join target lain → di log target itu, blok **👤 Riwayat** menampilkan nama/username lama *dan* baru, terbaru di atas
