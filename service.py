@@ -7,6 +7,7 @@ dan `store` (db.Store).
 
 from __future__ import annotations
 
+import asyncio
 import html
 import io
 import logging
@@ -14,39 +15,16 @@ import re
 import time
 from datetime import datetime
 
-from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from db import WIB, display_username, format_history_block, validate_contact
+from db import WIB, display_username, format_history_block
 
 log = logging.getLogger("verifybot.service")
 
-VERIFY_PROMPT = (
-    "Halo {name} 👋\n\n"
-    "Permintaan/akses kamu ke *{target}* lagi menunggu verifikasi.\n"
-    "Biar bisa lanjut, kamu *wajib* membagikan nomor HP kamu sendiri lewat "
-    "tombol *📱 Kirim Nomor HP* di bawah ini.\n\n"
-    "⏰ Batas waktu verifikasi: *{deadline_str}* (30 detik per target yang menunggu).\n"
-    "Kalau lewat dari batas itu, permintaan kamu ditolak / kamu dikeluarkan "
-    "dari target — tapi tenang, kamu bisa minta join lagi dan verifikasi ulang.\n\n"
-    "Nomor HP cuma dipakai buat catatan verifikasi admin, nggak dibagikan ke siapa pun."
-)
-
-
-def contact_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 Kirim Nomor HP", request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
-
-
-GATEWAY_PROMPT = (
-    "Halo {name} 👋\n\n"
-    "Kamu mau masuk ke *{target}*.\n"
-    "Sebelum itu, verifikasi nomor HP dulu ya — tap tombol *📱 Kirim Nomor HP* "
-    "di bawah dan bagikan nomor HP kamu sendiri.\n\n"
-    "Sesudah verifikasi lolos, tombol masuk ke *{target}* langsung muncul di sini. "
-    "Nomor HP cuma dipakai buat catatan verifikasi admin, nggak dibagikan ke siapa pun."
-)
+# MODE TANPA VERIFIKASI (keputusan owner 2026-11-15): tidak ada lagi gerbang
+# nomor HP. Join request langsung di-approve, join langsung langsung diterima,
+# dan bot hanya MENCATAT data member (tanpa nomor HP) ke grup log. Yang tetap
+# ditegakkan: ban global & ban-keluar (user ter-ban tetap ditolak di pintu).
 
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
@@ -80,12 +58,13 @@ def target_for_code(store, code: str):
 
 
 async def make_entry_link(bot, store, target: dict, user_id: int):
-    """Link masuk untuk user yang sudah terverifikasi.
+    """Link masuk untuk user (mode tanpa verifikasi: langsung diterbitkan).
 
     Urutan: (1) link tipe Request Admin Approval yang diterbitkan bot per
     user (bernama "Verifikasi <user_id>", kedaluwarsa 1 jam) — link ini
     yang paling aman disebar ulang sekalipun: isinya cuma hak MEMINTA join,
-    dan bot hanya menyetujui peminta yang sudah terverifikasi; (2) link
+    dan bot menyetujui semua peminta secara otomatis (kecuali yang ter-ban,
+    yang memang ditolak di semua jalur); (2) link
     langsung sekali pakai (member_limit=1); (3) link mentah yang
     didaftarkan owner; (4) link utama chat dari getChat.
     None bila semuanya gagal.
@@ -131,22 +110,21 @@ async def _revoke_minted_link(bot, chat_id: int, url, name):
 
 
 async def send_gateway_entry(bot, store, user_id: int, target: dict):
-    """Kirim tombol masuk ke target untuk user terverifikasi."""
+    """Kirim tombol masuk ke target (langsung, tanpa verifikasi apa pun)."""
     title = target.get("title") or str(target["_id"])
     url = await make_entry_link(bot, store, target, user_id)
     if not url:
         await _send_dm(bot, user_id,
-                       f"✅ Kamu sudah terverifikasi, tapi bot gagal menyiapkan link masuk ke "
+                       f"Bot gagal menyiapkan link masuk ke "
                        f"*{_md_escape(title)}*. Kabari admin ya biar dibantu masuk manual.",
                        parse_mode="Markdown")
         return False
     markup = InlineKeyboardMarkup(
         [[InlineKeyboardButton(f"🚀 Masuk ke {title}", url=url)]])
     await _send_dm(bot, user_id,
-                   f"✅ Verifikasi kamu sudah lolos!\n"
                    f"Tap tombol di bawah buat membuka *{_md_escape(title)}*, lalu tap "
-                   f"*Minta Bergabung* di sana — karena kamu sudah terverifikasi, bot "
-                   f"langsung menyetujui permintaanmu dalam hitungan detik.",
+                   f"*Minta Bergabung* di sana — permintaanmu langsung disetujui "
+                   f"otomatis dalam hitungan detik, tanpa verifikasi apa pun.",
                    parse_mode="Markdown", reply_markup=markup, protect_content=True)
     return True
 
@@ -303,8 +281,9 @@ async def send_sweep_file(bot, store, owner_id: int, chat_id: int,
 def ban_thread_id_for(store, kind: str):
     """Topik tujuan catatan ban menurut jenisnya, biar tidak kecampur:
     'global' -> topik log ban global (/setbanlog); 'keluar' -> topik log
-    ban-keluar (/setlogkeluar), jatuh ke topik ban global bila belum
-    dipasang, lalu ke General bila dua-duanya belum ada."""
+    ban-keluar (/setlogkeluar) — SATU topik yang sama untuk SEMUA target
+    (bukan per target) — jatuh ke topik ban global bila belum dipasang,
+    lalu ke General bila dua-duanya belum ada."""
     if kind == "keluar":
         return (store.get_setting("leaveban_thread_id")
                 or store.get_setting("ban_thread_id"))
@@ -349,7 +328,6 @@ def _user_block(store, user_id: int) -> str:
         f"📱 Nomor HP: {_esc(user.get('phone') or '-')}",
         f"⭐ Premium: {'Ya' if user.get('is_premium') else 'Tidak'}",
         f"🌐 Bahasa aplikasi: {_esc(user.get('language_code') or '-')}",
-        f"✅ Status verifikasi: {'Terverifikasi' if user.get('verified') else 'Belum terverifikasi'}",
         f"🚫 Ban global di bot: {'Ya' if user.get('banned') else 'Tidak'}",
     ]
     history = ""
@@ -520,15 +498,11 @@ def parse_export_file(text: str, file_name: str = "") -> dict:
 async def _gateway_for_target(bot, store, user, target: dict):
     if store.is_banned(user.id):
         return "banned"  # senyap: tanpa balasan apa pun (permintaan owner)
-    store.set_user_gateway(user.id, target["_id"])
-    if store.is_verified(user.id):
-        await send_gateway_entry(bot, store, user.id, target)
-        return "entry_sent"
-    text = GATEWAY_PROMPT.format(name=_md_escape(full_name_of(user)),
-                                 target=_md_escape(target.get("title") or "target"))
-    await _send_dm(bot, user.id, text, parse_mode="Markdown",
-                   reply_markup=contact_keyboard())
-    return "prompted"
+    if store.has_left_ban(user.id, target["_id"]):
+        return "banned"  # ban-keluar di target ini: senyap juga, jangan dikasih jalan masuk
+    # Mode tanpa verifikasi: tombol masuk langsung dikirim, tanpa langkah apa pun.
+    await send_gateway_entry(bot, store, user.id, target)
+    return "entry_sent"
 
 
 async def handle_gateway_start(bot, store, owner_id: int, user, code: str,
@@ -657,6 +631,32 @@ def _is_parse_error(exc: Exception) -> bool:
     return "parse" in msg or "entities" in msg
 
 
+async def _call_with_retry(factory, what: str, attempts: int = 3):
+    """Jalankan satu panggilan Bot API kritis dengan pengulangan bila gagal
+    karena jaringan/timeout.
+
+    Kejadian nyata 2026-11-15: approveChatJoinRequest untuk join request
+    BLACK ROOM timeout sekali (jaringan mesin/proxy tersendat sesaat) dan
+    request-nya menggantung tidak ter-approve, padahal update-nya sudah
+    terproses. Error Telegram yang bersifat pasti (BadRequest/Forbidden)
+    TIDAK diulang — memang akan gagal lagi; selain itu dicoba sampai
+    `attempts` kali dengan jeda membesar.
+    """
+    last = None
+    for i in range(attempts):
+        try:
+            return await factory()
+        except Exception as exc:
+            if exc.__class__.__name__ in ("BadRequest", "Forbidden"):
+                raise
+            last = exc
+            log.warning("%s gagal (percobaan %s/%s): %s",
+                        what, i + 1, attempts, exc)
+            if i + 1 < attempts:
+                await asyncio.sleep(1.5 * (i + 1))
+    raise last
+
+
 async def _send_dm(bot, chat_id, text, **kwargs):
     try:
         await bot.send_message(chat_id=chat_id, text=text, **kwargs)
@@ -749,7 +749,6 @@ def build_log_text(store, user_id: int, target: dict, event_label: str,
         f"👤 Nama: {_profile_anchor(user_id, user.get('name') or '-')}",
         f"🔗 Username: {_esc(display_username(user.get('username')))}",
         f"🆔 ID: <code>{user_id}</code>",
-        f"📱 Nomor HP: {_esc(user.get('phone') or '(belum ada)')}",
         f"💎 Premium: {'Ya' if user.get('is_premium') else 'Tidak'}",
         f"🗣 Bahasa: {_esc(user.get('language_code') or '-')}",
     ]
@@ -816,8 +815,8 @@ async def send_log(bot, store, owner_id: int, user_id: int, target: dict,
             await flush_unpaired_logs(bot, store)
         return True
 
-    # protect_content: log berisi nomor HP — cegah diteruskan/disalin keluar
-    # dari grup log oleh siapa pun yang bisa melihatnya.
+    # protect_content: log berisi data member — cegah diteruskan/disalin
+    # keluar dari grup log oleh siapa pun yang bisa melihatnya.
     base = {"chat_id": log_group_id, "protect_content": True}
     if thread_id:
         base["message_thread_id"] = thread_id
@@ -900,6 +899,151 @@ async def flush_unpaired_logs(bot, store) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Topik log otomatis per target                                                #
+# --------------------------------------------------------------------------- #
+
+_TOPIC_ICON_PREFERRED = ["🛡️", "🔐", "🔒", "👥", "📣", "🎬", "🤖"]
+
+
+async def _topic_icon_id(bot, preferred=None):
+    """Pilih icon_custom_emoji_id dari set ikon resmi Telegram (satu-satunya
+    sumber ikon yang boleh dipakai topik forum). None bila tidak ada yang
+    cocok — topik dibuat tanpa ikon khusus."""
+    try:
+        stickers = await bot.get_forum_topic_icon_stickers()
+    except Exception:
+        return None
+    by_emoji = {}
+    for sticker in stickers or []:
+        emoji = getattr(sticker, "emoji", None)
+        custom_id = getattr(sticker, "custom_emoji_id", None)
+        if emoji and custom_id:
+            by_emoji[emoji] = custom_id
+    for emoji in (preferred or _TOPIC_ICON_PREFERRED):
+        if emoji in by_emoji:
+            return by_emoji[emoji]
+    return None
+
+
+# Topik klasifikasi ban yang dibuatkan otomatis (klasifikasi TETAP terpisah,
+# koreksi owner 2026-11-15): (setting, nama topik, ikon pilihan, keterangan)
+BAN_TOPIC_DEFS = [
+    ("ban_thread_id", "Log Ban",
+     ["⛔", "🚫", "👮‍♂️", "👮"],
+     "Catatan ban global: ban manual, unban, sapuan daftar ban, dan upaya "
+     "join user ter-ban global yang digagalkan."),
+    ("leaveban_thread_id", "Log Ban Keluar",
+     ["🚪", "⛔", "🚫"],
+     "Catatan ban-karena-keluar dari SEMUA target jadi satu di sini: member "
+     "keluar sendiri yang otomatis di-ban + upaya joinnya yang digagalkan."),
+    ("fileban_thread_id", "File Ban Global",
+     ["📁", "🗂️", "📄", "💾"],
+     "File sapuan daftar ban global tiap bot jadi admin di target baru "
+     "(satu file .txt per target)."),
+]
+
+
+async def ensure_ban_topics(bot, store) -> int:
+    """Buatkan topik klasifikasi ban yang belum dipasang (meniru grup log
+    bot fsub): 'Log Ban', 'Log Ban Keluar', 'File Ban Global' — masing-masing
+    klasifikasi tetap topik sendiri. Yang sudah dipasang (otomatis maupun
+    manual via /setbanlog dkk.) tidak disentuh. Mengembalikan jumlah topik
+    yang baru dibuat; kegagalan per topik ditoleransi (dicoba lagi di
+    pemanggilan berikutnya)."""
+    log_group_id = store.get_setting("log_group_id")
+    if not log_group_id:
+        return 0
+    made = 0
+    for setting_key, name, icons, note in BAN_TOPIC_DEFS:
+        if store.get_setting(setting_key):
+            continue
+        kwargs = {"chat_id": log_group_id, "name": name}
+        icon_id = await _topic_icon_id(bot, icons)
+        if icon_id:
+            kwargs["icon_custom_emoji_id"] = icon_id
+        try:
+            topic = await bot.create_forum_topic(**kwargs)
+        except Exception as exc:
+            log.warning("Gagal buat topik ban otomatis %s: %s", name, exc)
+            continue
+        thread_id = getattr(topic, "message_thread_id", None)
+        if not thread_id:
+            continue
+        store.set_setting(setting_key, thread_id)
+        made += 1
+        try:
+            await bot.send_message(
+                chat_id=log_group_id, message_thread_id=thread_id,
+                text=(f"📌 Topik *{name}* — dibuat & dipasangkan otomatis "
+                      f"oleh bot. {note}"),
+                parse_mode="Markdown")
+        except Exception as exc:
+            log.debug("Gagal kirim pesan pembuka topik ban %s: %s", name, exc)
+    return made
+
+
+async def ensure_target_topic(bot, store, chat_id: int, title: str = ""):
+    """Pastikan target punya topik log sendiri di grup log; buat bila belum.
+
+    Meniru grup log bot fsub: topik dibuat & dipasangkan OTOMATIS oleh bot
+    (nama = nama target, plus ikon emoji bila tersedia di set resmi), jadi
+    owner tidak perlu membuat topik manual + /pasang lagi. Mengembalikan
+    thread_id (yang lama / yang baru dibuat), atau None bila tidak bisa
+    dibuat (grup log belum diatur, chat-nya grup log sendiri, atau bot
+    tidak berizin Kelola Topik di grup log) — kegagalan tidak dilempar:
+    log target itu sementara ditampung seperti biasa dan /pasang manual
+    tetap tersedia sebagai cadangan.
+    """
+    log_group_id = store.get_setting("log_group_id")
+    if not log_group_id or int(chat_id) == int(log_group_id):
+        return None
+    target = store.get_target(chat_id) or {}
+    if target.get("thread_id"):
+        return target["thread_id"]
+    name = (title or target.get("title") or str(chat_id))[:128]
+    kwargs = {"chat_id": log_group_id, "name": name}
+    icon_id = await _topic_icon_id(bot)
+    if icon_id:
+        kwargs["icon_custom_emoji_id"] = icon_id
+    try:
+        topic = await bot.create_forum_topic(**kwargs)
+    except Exception as exc:
+        log.warning("Gagal buat topik log otomatis untuk %s: %s", chat_id, exc)
+        return None
+    thread_id = getattr(topic, "message_thread_id", None)
+    if not thread_id:
+        return None
+    store.set_target_thread(chat_id, thread_id)
+    try:
+        await bot.send_message(
+            chat_id=log_group_id, message_thread_id=thread_id,
+            text=(f"📌 Topik log untuk target *{_md_escape(name)}* — dibuat & "
+                  "dipasangkan otomatis oleh bot. Semua catatan member "
+                  "target ini masuk ke sini."),
+            parse_mode="Markdown")
+    except Exception as exc:
+        log.debug("Gagal kirim pesan pembuka topik %s: %s", chat_id, exc)
+    return thread_id
+
+
+async def ensure_all_target_topics(bot, store) -> int:
+    """Buatkan topik untuk SEMUA target terdaftar yang belum punya —
+    pengejar saat /setlog atau /buattopik. Mengembalikan jumlah topik
+    yang baru dibuat."""
+    made = 0
+    log_group_id = store.get_setting("log_group_id")
+    for target in store.list_targets():
+        if log_group_id and target["_id"] == log_group_id:
+            continue
+        before = target.get("thread_id")
+        after = await ensure_target_topic(bot, store, target["_id"],
+                                          target.get("title") or "")
+        if after and not before:
+            made += 1
+    return made
+
+
+# --------------------------------------------------------------------------- #
 # Jalur A — join request                                                       #
 # --------------------------------------------------------------------------- #
 
@@ -919,7 +1063,10 @@ async def handle_join_request(bot, store, owner_id: int, chat, user,
 
     if store.is_banned(user.id):
         try:
-            await bot.decline_chat_join_request(chat_id=chat.id, user_id=user.id)
+            await _call_with_retry(
+                lambda: bot.decline_chat_join_request(chat_id=chat.id,
+                                                      user_id=user.id),
+                f"decline join request user ter-ban {user.id}")
         except Exception as exc:
             log.warning("Gagal decline join request user ter-ban %s: %s", user.id, exc)
         await send_ban_report(
@@ -932,7 +1079,10 @@ async def handle_join_request(bot, store, owner_id: int, chat, user,
 
     if store.has_left_ban(user.id, chat.id):
         try:
-            await bot.decline_chat_join_request(chat_id=chat.id, user_id=user.id)
+            await _call_with_retry(
+                lambda: bot.decline_chat_join_request(chat_id=chat.id,
+                                                      user_id=user.id),
+                f"decline join request user ban-keluar {user.id}")
         except Exception as exc:
             log.warning("Gagal decline join request user ban-keluar %s: %s", user.id, exc)
         await send_ban_report(
@@ -943,59 +1093,39 @@ async def handle_join_request(bot, store, owner_id: int, chat, user,
             ts=ts, kind="keluar")
         return "left_banned"
 
-    if store.is_verified(user.id):
-        await bot.approve_chat_join_request(chat_id=chat.id, user_id=user.id)
-        await send_log(bot, store, owner_id, user.id, target,
-                       "Member baru — sudah terverifikasi (join request langsung di-approve)",
-                       source, ts)
-        await _revoke_minted_link(bot, chat.id, link_url, link_name)
-        return "approved_verified"
-
-    deadline = store.add_pending(user.id, chat.id, kind="join_request", ts=ts,
-                                 invite_link=link_url, invite_name=link_name,
-                                 user_chat_id=user_chat_id)
-    dm_target = user_chat_id or user.id
-    text = VERIFY_PROMPT.format(name=_md_escape(full_name_of(user)),
-                                target=_md_escape(target.get("title") or "target"),
-                                deadline_str=_now_str(deadline))
-    await _send_dm(bot, dm_target, text, parse_mode="Markdown",
-                   reply_markup=contact_keyboard())
-    return "pending"
+    # Mode tanpa verifikasi: semua join request (selain user ter-ban di
+    # atas) langsung di-approve; bot hanya mencatat datanya ke log.
+    try:
+        await _call_with_retry(
+            lambda: bot.approve_chat_join_request(chat_id=chat.id,
+                                                  user_id=user.id),
+            f"approve join request {user.id}@{chat.id}")
+    except Exception as exc:
+        # Approve gagal total walau sudah dicoba ulang: request-nya masih
+        # menggantung di Telegram (owner bisa approve manual, atau user
+        # membatalkan lalu minta lagi). Log member TIDAK dikirim — dia
+        # memang belum masuk.
+        log.warning("Approve join request %s di %s GAGAL TOTAL: %s",
+                    user.id, chat.id, exc)
+        return "approve_failed"
+    await send_log(bot, store, owner_id, user.id, target,
+                   "Member baru (join request langsung di-approve)",
+                   source, ts)
+    await _revoke_minted_link(bot, chat.id, link_url, link_name)
+    return "approved"
 
 
 # --------------------------------------------------------------------------- #
 # Jalur B — join langsung                                                      #
 # --------------------------------------------------------------------------- #
 
-async def _restrict(bot, chat_id, user_id, allow: bool):
-    if allow:
-        perms = None
-        try:
-            chat = await bot.get_chat(chat_id)
-            perms = getattr(chat, "permissions", None)
-        except Exception:
-            perms = None
-        if perms is None:
-            perms = ChatPermissions(can_send_messages=True, can_send_audios=True,
-                                    can_send_documents=True, can_send_photos=True,
-                                    can_send_videos=True, can_send_video_notes=True,
-                                    can_send_voice_notes=True, can_send_polls=True,
-                                    can_send_other_messages=True, can_add_web_page_previews=True,
-                                    can_invite_users=True)
-        await bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=perms)
-    else:
-        perms = ChatPermissions(can_send_messages=False, can_send_audios=False,
-                                can_send_documents=False, can_send_photos=False,
-                                can_send_videos=False, can_send_video_notes=False,
-                                can_send_voice_notes=False, can_send_polls=False,
-                                can_send_other_messages=False, can_add_web_page_previews=False,
-                                can_invite_users=False)
-        await bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=perms)
-
-
 async def handle_direct_join(bot, store, owner_id: int, chat, user,
                              invite_link=None, ts: float = None, bot_username: str = ""):
-    """Proses member yang langsung jadi member (grup: restrict; channel: pending saja)."""
+    """Proses member yang langsung jadi member: diterima penuh, data dicatat.
+
+    Mode tanpa verifikasi — tidak ada restrict / pesan verifikasi / deadline.
+    Pengecualian cuma user ter-ban (global / ban-keluar), yang di-ban lagi.
+    """
     ts = time.time() if ts is None else ts
     chat_type = getattr(chat, "type", "")
     store.register_target(chat.id, getattr(chat, "title", ""), chat_type)
@@ -1006,13 +1136,14 @@ async def handle_direct_join(bot, store, owner_id: int, chat, user,
     link_url = getattr(invite_link, "invite_link", None) if invite_link else None
     link_name = getattr(invite_link, "name", None) if invite_link else None
     source = _source_of(link_name, link_url)
-    is_group = chat_type in ("group", "supergroup")
 
     if store.is_banned(user.id):
         # User ter-ban yang masih bisa nyelonong masuk (mis. link lama):
         # langsung ban lagi dari target ini, tanpa unban.
         try:
-            await bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+            await _call_with_retry(
+                lambda: bot.ban_chat_member(chat_id=chat.id, user_id=user.id),
+                f"ban ulang user ter-ban {user.id}@{chat.id}")
         except Exception as exc:
             log.warning("Gagal ban ulang user ter-ban %s di %s: %s", user.id, chat.id, exc)
         await send_ban_report(
@@ -1025,7 +1156,9 @@ async def handle_direct_join(bot, store, owner_id: int, chat, user,
 
     if store.has_left_ban(user.id, chat.id):
         try:
-            await bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+            await _call_with_retry(
+                lambda: bot.ban_chat_member(chat_id=chat.id, user_id=user.id),
+                f"ban ulang user ban-keluar {user.id}@{chat.id}")
         except Exception as exc:
             log.warning("Gagal ban ulang user ban-keluar %s di %s: %s", user.id, chat.id, exc)
         await send_ban_report(
@@ -1036,184 +1169,10 @@ async def handle_direct_join(bot, store, owner_id: int, chat, user,
             ts=ts, kind="keluar")
         return "left_banned"
 
-    if store.is_verified(user.id):
-        await send_log(bot, store, owner_id, user.id, target,
-                       "Member baru (sudah terverifikasi)", source, ts)
-        await _revoke_minted_link(bot, chat.id, link_url, link_name)
-        return "logged_verified"
-
-    kind = "direct_group" if is_group else "direct_channel"
-    deadline = store.add_pending(user.id, chat.id, kind=kind, ts=ts,
-                                 invite_link=link_url, invite_name=link_name)
-    if is_group:
-        try:
-            await _restrict(bot, chat.id, user.id, allow=False)
-        except Exception as exc:
-            log.warning("Gagal restrict %s di %s: %s", user.id, chat.id, exc)
-        deep = f"https://t.me/{bot_username}?start=verify" if bot_username else None
-        markup = (InlineKeyboardMarkup([[InlineKeyboardButton("✅ Verifikasi Sekarang", url=deep)]])
-                  if deep else None)
-        if getattr(user, "username", None):
-            mention = _md_escape(f"@{user.username}")
-        else:
-            # Tanpa username, namanya dibuat tautan sebutan berbasis ID —
-            # bisa di-tap menuju profilnya (dia member grup ini, jadi
-            # tautan jenis ini dijamin Telegram berfungsi di sini).
-            mention = (f"[{_md_escape(full_name_of(user))}]"
-                       f"(tg://user?id={user.id})")
-        group_text = (f"Halo {mention} 👋 Kamu baru bergabung dan sementara *dibatasi* dulu.\n"
-                      f"Selesaikan verifikasi nomor HP lewat tombol di bawah sebelum "
-                      f"*{_now_str(deadline)}* — kalau lewat, kamu akan dikeluarkan dari grup ini.")
-        sent_msg = None
-        try:
-            sent_msg = await bot.send_message(
-                chat_id=chat.id,
-                text=group_text,
-                parse_mode="Markdown", reply_markup=markup,
-            )
-        except Exception as exc:
-            log.warning("Gagal kirim pesan verifikasi grup %s: %s", chat.id, exc)
-            if _is_parse_error(exc):
-                # Gagal format, bukan gagal kirim: coba lagi sebagai teks polos.
-                try:
-                    sent_msg = await bot.send_message(
-                        chat_id=chat.id,
-                        text=_plain_markdown(group_text),
-                        reply_markup=markup,
-                    )
-                    log.info("Pesan verifikasi grup %s terkirim sebagai teks polos "
-                             "(Markdown ditolak Telegram).", chat.id)
-                except Exception as exc2:
-                    log.warning("Gagal kirim pesan verifikasi grup teks polos %s: %s",
-                                chat.id, exc2)
-        # Catat message_id-nya: pesan ini dihapus otomatis begitu verifikasi
-        # user ini selesai / kedaluwarsa / dibatalkan (lihat
-        # complete_verification & expire_pendings), biar grup tidak penuh.
-        await _remember_prompt_message(store, user.id, chat.id, sent_msg)
-    else:
-        # Channel tidak punya pesan publik per-user. Coba DM prompt verifikasi:
-        # terkirim hanya bila user pernah Start bot (mis. diarahkan dari
-        # postingan pin channel); kalau belum, _send_dm menelan error 403-nya.
-        text = VERIFY_PROMPT.format(name=_md_escape(full_name_of(user)),
-                                    target=_md_escape(target.get("title") or "target"),
-                                    deadline_str=_now_str(deadline))
-        await _send_dm(bot, user.id, text, parse_mode="Markdown",
-                       reply_markup=contact_keyboard())
-    return "pending"
-
-
-# --------------------------------------------------------------------------- #
-# Contact & penyelesaian verifikasi                                            #
-# --------------------------------------------------------------------------- #
-
-async def handle_contact(bot, store, owner_id: int, user, contact, ts: float = None):
-    """Tangani pesan contact. Mengembalikan status string."""
-    ts = time.time() if ts is None else ts
-    store.record_encounter(user.id, full_name_of(user), getattr(user, "username", None), ts=ts)
-    if store.is_banned(user.id):
-        return "banned"  # senyap: tanpa balasan apa pun (permintaan owner)
-    if not validate_contact(user.id, getattr(contact, "user_id", None)):
-        await _send_dm(bot, user.id,
-                       "⚠️ Nomor itu bukan nomor HP akun kamu sendiri. "
-                       "Kirim ulang ya pakai tombol *📱 Kirim Nomor HP* dengan nomor milikmu.",
-                       parse_mode="Markdown", reply_markup=contact_keyboard())
-        return "rejected_foreign_number"
-
-    phone = getattr(contact, "phone_number", "") or ""
-    store.mark_verified(user.id, phone)
-    await complete_verification(bot, store, owner_id, user, ts)
-    await _send_dm(bot, user.id,
-                   "✅ Verifikasi berhasil! Nomor kamu sudah tercatat dan akses kamu "
-                   "ke semua target yang menunggu sudah dibuka. Selamat bergabung 🎉")
-    return "verified"
-
-
-async def complete_verification(bot, store, owner_id: int, user, ts: float = None):
-    """Selesaikan SEMUA pending user: approve join request, buka restrict, kirim log."""
-    ts = time.time() if ts is None else ts
-    done = []
-    for pending in store.list_pendings(user.id):
-        chat_id = pending["chat_id"]
-        target = store.get_target(chat_id) or {"_id": chat_id, "title": str(chat_id)}
-        source = _source_of(pending.get("invite_name"), pending.get("invite_link"))
-        try:
-            if pending["kind"] == "join_request":
-                await bot.approve_chat_join_request(chat_id=chat_id, user_id=user.id)
-                label = "Member baru terverifikasi (join request di-approve)"
-            elif pending["kind"] == "direct_group":
-                await _restrict(bot, chat_id, user.id, allow=True)
-                label = "Member baru terverifikasi (pembatasan grup dibuka)"
-            else:
-                label = "Member baru terverifikasi"
-            await send_log(bot, store, owner_id, user.id, target, label, source, ts)
-            await _revoke_minted_link(bot, chat_id, pending.get("invite_link"),
-                                      pending.get("invite_name"))
-            done.append(chat_id)
-        except Exception as exc:
-            log.warning("Gagal selesaikan pending %s/%s: %s", user.id, chat_id, exc)
-        # Verifikasinya beres untuk target ini: pesan verifikasi di grupnya
-        # (kalau ada) dihapus otomatis supaya grup bersih.
-        await _delete_prompt_message(bot, pending)
-        store.remove_pending(user.id, chat_id)
-    # Tujuan dari link gerbang: sesudah verifikasi lolos, langsung kirim
-    # tombol masuk ke target yang dia tuju.
-    gw_chat = store.get_user_gateway(user.id)
-    if gw_chat:
-        gw_target = store.get_target(gw_chat)
-        if gw_target is not None:
-            await send_gateway_entry(bot, store, user.id, gw_target)
-        store.clear_user_gateway(user.id)
-    return done
-
-
-# --------------------------------------------------------------------------- #
-# Kedaluwarsa                                                                  #
-# --------------------------------------------------------------------------- #
-
-async def expire_pendings(bot, store, owner_id: int, now: float = None):
-    """Proses semua pending yang deadline-nya sudah lewat.
-
-    Join request -> decline. Grup/channel join langsung -> ban+unban (kick).
-    Mengembalikan daftar (user_id, chat_id, kind) yang diproses.
-    """
-    now = time.time() if now is None else now
-    processed = []
-    by_user = {}
-    for pending in store.expired_pendings(now):
-        by_user.setdefault(pending["user_id"], []).append(pending)
-
-    for user_id, pendings in by_user.items():
-        any_done = False
-        for pending in pendings:
-            chat_id, kind = pending["chat_id"], pending["kind"]
-            try:
-                if kind == "join_request":
-                    await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
-                else:
-                    await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-                    # Ban-karena-keluar bersifat permanen: jangan di-unban di
-                    # sini, supaya status ter-bannya dari target itu utuh.
-                    if not store.has_left_ban(user_id, chat_id):
-                        await bot.unban_chat_member(chat_id=chat_id, user_id=user_id,
-                                                    only_if_banned=True)
-            except Exception as exc:
-                # PENTING: pending JANGAN dihapus — biarkan pemeriksa deadline
-                # mencoba lagi di siklus berikutnya sampai penegakannya berhasil.
-                # (Kasus nyata 2026-11-12: banChatMember timeout sekali dan
-                # member yang belum verifikasi lolos tetap di dalam channel
-                # karena pending-nya terlanjur terhapus.)
-                log.warning("Gagal expire pending %s/%s (akan dicoba lagi): %s",
-                            user_id, chat_id, exc)
-                continue
-            processed.append((user_id, chat_id, kind))
-            # Waktunya habis & user sudah ditendang/ditolak: pesan verifikasi
-            # di grupnya dihapus otomatis juga, jangan jadi sampah di grup.
-            await _delete_prompt_message(bot, pending)
-            store.remove_pending(user_id, chat_id)
-            any_done = True
-        if any_done:
-            await _send_dm(bot, user_id,
-                           "⏰ Batas waktu verifikasi kamu sudah habis, jadi permintaan/akses "
-                           "yang menunggu sudah dibatalkan. Kamu bisa minta join lagi kapan pun "
-                           "dan selesaikan verifikasinya dalam batas waktu ya.")
-    return processed
+    # Mode tanpa verifikasi: member langsung diterima penuh — tidak
+    # di-restrict, tidak ada pesan verifikasi, tidak ada deadline. Bot
+    # hanya mencatat datanya ke log.
+    await send_log(bot, store, owner_id, user.id, target,
+                   "Member baru (join langsung)", source, ts)
+    await _revoke_minted_link(bot, chat.id, link_url, link_name)
+    return "logged"

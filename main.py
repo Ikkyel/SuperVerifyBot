@@ -1,18 +1,20 @@
-"""Bot Verifikasi Member Telegram — titik masuk.
+"""Bot Security / Pencatat Member Telegram — titik masuk.
 
-Satu bot menjaga banyak channel/grup private:
-- Jalur A (join request): user wajib share nomor HP sendiri di DM -> auto-approve.
-- Jalur B (join langsung, mis. dari bot fsub): grup -> restrict sampai verifikasi
-  selesai atau deadline lewat (dikeluarkan); channel -> pending (best-effort).
-- Verifikasi cukup sekali untuk semua target; deadline 30 detik per target pending.
-- Log lengkap + riwayat nama/username dikirim ke topik grup forum per target.
+MODE TANPA VERIFIKASI (keputusan owner 2026-11-15): satu bot menjaga banyak
+channel/grup private, dan:
+- Jalur A (join request): langsung di-approve otomatis.
+- Jalur B (join langsung, mis. dari bot fsub): langsung diterima penuh.
+- Bot hanya MENCATAT data member (nama, username, ID, foto, bio, Premium,
+  bahasa, riwayat nama/username — TANPA nomor HP) ke topik grup forum per
+  target; target tanpa topik ditampung lalu dikeluarkan sebagai file .txt.
+- Penegakan yang tetap jalan: ban global (blokir senyap + ban semua target)
+  dan ban-keluar (member keluar sendiri otomatis di-ban dari target itu).
 
 Env: BOT_TOKEN, OWNER_ID, MONGODB_URI, LOG_GROUP_ID (opsional — bisa /setlog).
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 
@@ -29,7 +31,6 @@ from telegram.ext import (
 
 import db as dbmod
 import handlers
-import service
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s: %(message)s")
@@ -39,48 +40,19 @@ ALLOWED_UPDATES = ["message", "callback_query", "chat_join_request",
                    "chat_member", "my_chat_member"]
 
 
-async def _check_expired(context):
-    app = context.application
-    await service.expire_pendings(app.bot, app.bot_data["store"],
-                                  app.bot_data["owner_id"])
-
-
-async def _deadline_loop(app: Application):
-    """Cadangan pemeriksa deadline bila JobQueue (APScheduler) tidak tersedia."""
-    while True:
-        try:
-            await _check_expired(_SimpleContext(app))
-        except Exception:  # jangan sampai loop mati karena satu error
-            log.exception("Pemeriksa deadline (loop cadangan) error.")
-        await asyncio.sleep(5)
-
-
-class _SimpleContext:
-    def __init__(self, app):
-        self.application = app
-
-
 async def _post_init(app: Application):
     store = app.bot_data["store"]
-    # Pending yang deadline-nya lewat selama bot mati -> proses segera.
-    processed = await service.expire_pendings(app.bot, store, app.bot_data["owner_id"])
-    if processed:
-        log.info("Startup: %s pending kedaluwarsa diproses.", len(processed))
-    pending_count = len(store.list_pendings())
-    log.info("Bot jalan. Pending aktif dimuat ulang dari DB: %s", pending_count)
-    # Pemeriksa deadline berkala: JobQueue bila ada, kalau tidak loop asyncio.
-    if app.job_queue is not None:
-        app.job_queue.run_repeating(_check_expired, interval=5, first=5,
-                                    name="deadline_checker")
-    else:
-        log.warning("JobQueue tidak tersedia — pakai loop deadline cadangan.")
-        app.bot_data["deadline_task"] = asyncio.create_task(_deadline_loop(app))
-
-
-async def _post_shutdown(app: Application):
-    task = app.bot_data.get("deadline_task")
-    if task is not None:
-        task.cancel()
+    # Pending verifikasi adalah sisa sistem lama (gerbang nomor HP). Di mode
+    # tanpa verifikasi tidak ada pending baru; sisa lama cukup dibersihkan
+    # catatannya — member terkait TIDAK dikeluarkan (tidak ada lagi deadline).
+    stale = store.list_pendings()
+    for pending in stale:
+        store.remove_pending(pending["user_id"], pending["chat_id"])
+    if stale:
+        log.info("Startup: %s catatan pending sisa sistem lama dibersihkan.",
+                 len(stale))
+    log.info("Bot jalan (mode tanpa verifikasi). Target terdaftar: %s",
+             len(store.list_targets()))
 
 
 def build_app() -> Application:
@@ -93,8 +65,7 @@ def build_app() -> Application:
     if env_log_group:
         store.set_setting("log_group_id", int(env_log_group))
 
-    app = (Application.builder().token(token).post_init(_post_init)
-           .post_shutdown(_post_shutdown).build())
+    app = Application.builder().token(token).post_init(_post_init).build()
     app.bot_data["store"] = store
     app.bot_data["owner_id"] = owner_id
 
@@ -116,6 +87,7 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.Document.ALL, handlers.restore_document))
     app.add_handler(CommandHandler("setlog", handlers.setlog_cmd))
+    app.add_handler(CommandHandler("buattopik", handlers.buattopik_cmd))
     app.add_handler(CommandHandler("pasang", handlers.pasang_cmd))
     app.add_handler(CommandHandler("setbanlog", handlers.setbanlog_cmd))
     app.add_handler(CommandHandler("setfilebanlog", handlers.setfilebanlog_cmd))
@@ -130,8 +102,6 @@ def build_app() -> Application:
                                       ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(handlers.chat_member_update,
                                       ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE,
-                                   handlers.contact_message))
     return app
 
 

@@ -22,6 +22,7 @@ OWNER_HELP = (
     "/targets — daftar channel/grup target yang dijaga bot + status topik log-nya\n"
     "/gerbang — daftar link gerbang semua target (buat disebar ke user)\n"
     "/setlog — jalankan di dalam grup log (forum) untuk menetapkan grup itu sebagai tujuan log\n"
+    "/buattopik — buatkan topik log untuk semua target yang belum punya (otomatis juga tiap target baru)\n"
     "/pasang — jalankan di dalam topik grup log, lalu pilih target untuk topik itu\n"
     "/help — bantuan lengkap (daftar perintah + keterangan + alur)\n"
     "/start — info bot\n"
@@ -93,22 +94,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if handled != "unknown":
             return
 
-    if store.list_pendings(user.id):
-        await update.message.reply_text(
-            "Kamu punya akses yang lagi menunggu verifikasi ⏳\n"
-            "Kirim nomor HP kamu sendiri lewat tombol di bawah ini buat menyelesaikannya ya.",
-            reply_markup=service.contact_keyboard())
-        return
-
     targets = [t for t in store.list_targets()
                if t["_id"] != store.get_setting("log_group_id")]
     text = (
-        "Halo 👋 Aku bot verifikasi member.\n"
-        "Kalau kamu minta join ke channel/grup yang aku jaga, aku akan minta kamu "
-        "membagikan nomor HP di sini buat verifikasi — sesudah itu permintaanmu "
-        "otomatis disetujui.")
+        "Halo 👋 Aku bot penjaga channel/grup.\n"
+        "Kalau kamu join ke channel/grup yang aku jaga, kamu langsung diterima — "
+        "nggak ada verifikasi apa pun yang perlu kamu lakukan. Aku cuma mencatat "
+        "data member buat admin.")
     if targets:
-        text += "\n\nAtau pilih tujuanmu di bawah ini buat mulai verifikasi sekarang:"
+        text += "\n\nMau masuk ke salah satu target? Pilih di bawah ini, nanti aku kasih tombol masuknya:"
         buttons = [[InlineKeyboardButton(f"🎯 {t.get('title') or t['_id']}",
                                          callback_data=f"gw:{t['_id']}")]
                    for t in targets]
@@ -146,11 +140,58 @@ async def setlog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Grup ini belum mengaktifkan Topics. Aktifkan dulu Topics di pengaturan grup, "
             "lalu jalankan /setlog lagi.")
         return
-    _store(context).set_setting("log_group_id", chat.id)
+    store = _store(context)
+    store.set_setting("log_group_id", chat.id)
+    # Pengejar (meniru grup log bot fsub): topik klasifikasi ban yang belum
+    # ada + topik untuk target lama yang belum punya, dibuatkan sekarang.
+    ban_made = await service.ensure_ban_topics(context.bot, store)
+    made = await service.ensure_all_target_topics(context.bot, store)
+    extras = ""
+    if ban_made:
+        extras += f"\nBot juga langsung membuat {ban_made} topik ban (Log Ban / Log Ban Keluar / File Ban Global)."
+    if made:
+        extras += f"\nBot juga langsung membuat {made} topik untuk target yang belum punya topik."
     await update.message.reply_text(
-        f"✅ Grup ini ditetapkan sebagai grup log verifikasi (`{chat.id}`).\n"
-        "Sekarang buat topik per target, lalu jalankan /pasang di dalam tiap topik.",
+        f"✅ Grup ini ditetapkan sebagai grup log (`{chat.id}`).\n"
+        "Semua topik sekarang dibuat OTOMATIS oleh bot: topik per target tiap "
+        "ada target baru, dan topik ban klasifikasinya sendiri-sendiri — kamu "
+        "tidak perlu membuat topik & memasangkannya manual lagi (perintah "
+        "pairing manual tetap tersedia sebagai cadangan)." + extras,
         parse_mode="Markdown")
+
+
+async def buattopik_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Buatkan SEMUA topik log yang belum ada (pengejar): topik klasifikasi
+    ban + topik per target yang belum punya.
+
+    Biasanya tidak perlu dijalankan: topik target dibuat otomatis saat bot
+    jadi admin di target baru, dan topik ban saat /setlog. Perintah ini
+    untuk memaksa pengecekan ulang kapan pun owner mau.
+    """
+    if not _is_admin(update, context):
+        return
+    store = _store(context)
+    if not store.get_setting("log_group_id"):
+        await update.message.reply_text(
+            "Grup log belum diatur — jalankan /setlog di grup log dulu ya.")
+        return
+    ban_made = await service.ensure_ban_topics(context.bot, store)
+    made = await service.ensure_all_target_topics(context.bot, store)
+    if ban_made or made:
+        parts = []
+        if ban_made:
+            parts.append(f"{ban_made} topik ban")
+        if made:
+            parts.append(f"{made} topik target")
+        await update.message.reply_text(
+            "✅ Dibuat & dipasangkan otomatis di grup log: "
+            + " + ".join(parts) + ".")
+    else:
+        await update.message.reply_text(
+            "Semua topik sudah lengkap (topik ban + topik per target) — tidak "
+            "ada yang perlu dibuat. (Kalau ada yang gagal dibuat, biasanya "
+            "izin Kelola Topik bot di grup log belum aktif; log-nya sementara "
+            "ditampung jadi file.)")
 
 
 # --------------------------------------------------------------------------- #
@@ -167,10 +208,17 @@ HELP_TEXT = (
     "*Perintah yang dipakai di dalam grup log:*\n"
     "• /setlog — jalankan di grup log untuk menetapkan grup itu sebagai tujuan log "
     "(cukup sekali, di General)\n"
-    "• /pasang — jalankan *di dalam sebuah topik*, lalu tap target yang sesuai: "
-    "topik itu jadi tempat log verifikasi target tersebut\n"
+    "• /pasang — CADANGAN manual: jalankan *di dalam sebuah topik*, lalu tap target "
+    "yang sesuai. Biasanya tidak perlu — topik per target dibuat & dipasangkan "
+    "OTOMATIS oleh bot tiap ada target baru (dan lewat /buattopik untuk target lama)\n"
+    "• Topik ban (Log Ban, Log Ban Keluar, File Ban Global) dibuat & dipasangkan "
+    "OTOMATIS oleh bot saat /setlog atau /buattopik — perintah /setbanlog, "
+    "/setlogkeluar & /setfilebanlog di bawah hanya untuk memindahkan topiknya manual\n"
     "• /setbanlog — jalankan *di dalam sebuah topik* untuk menjadikannya topik "
-    "khusus log ban (ban/unban, sapuan daftar ban, member keluar yang di-ban)\n"
+    "khusus log ban global (ban/unban global, sapuan daftar ban, upaya join user "
+    "ter-ban global)\n"
+    "• /buattopik — buatkan topik log otomatis untuk semua target yang belum "
+    "punya topik (biasanya tidak perlu: topik dibuat bot sendiri tiap target baru)\n"
     "• /logfile — keluarkan kumpulan log verifikasi target yang belum punya topik "
     "sebagai satu file .txt ke General grup log (otomatis juga tiap 100 catatan tertampung)\n"
     "• /setfilebanlog — jalankan *di dalam sebuah topik* untuk menjadikannya topik khusus "
@@ -180,8 +228,8 @@ HELP_TEXT = (
     "bot membuat topik baru dan memposting isi file sebagai pesan chat di sana; "
     "kalau bot tidak bisa membuat topik, pakai /tempel di topik tujuan\n"
     "• /setlogkeluar — jalankan *di dalam sebuah topik* untuk menjadikannya topik khusus log "
-    "ban-keluar (member keluar yang otomatis di-ban + upaya joinnya yang digagalkan), "
-    "terpisah dari log ban global\n\n"
+    "ban-keluar — SATU topik yang sama untuk SEMUA target (member keluar yang otomatis "
+    "di-ban + upaya joinnya yang digagalkan), terpisah dari log ban global\n\n"
     "*Kelola admin (khusus owner, chat pribadi):*\n"
     "• /tambahadmin <id_user> — angkat user jadi admin bot\n"
     "• /hapusadmin <id_user> — cabut status admin user\n"
@@ -197,16 +245,14 @@ HELP_TEXT = (
     "• /backup — bot mengirim file JSON berisi DATA BAN saja (daftar ban global + ban-karena-keluar)\n"
     "• Pindah daftar ban ke bot lain: kirim file itu ke chat pribadi bot tujuan, lalu konfirmasi — "
     "daftar bannya digabung ke bot tujuan dan langsung diterapkan ke target-targetnya\n\n"
-    "*Alur user biasa:*\n"
+    "*Alur user biasa (mode tanpa verifikasi):*\n"
     "1. User membuka link gerbang target / link Request Admin Approval / join langsung.\n"
-    "2. Bot meminta nomor HP lewat tombol *📱 Kirim Nomor HP* (wajib nomor milik sendiri).\n"
-    "3. Nomor valid → otomatis di-approve/dibuka di semua target yang menunggu, "
-    "dan datanya tercatat di topik log target masing-masing.\n"
-    "4. Batas waktu verifikasi: 30 detik per target. Lewat batas → request ditolak / "
-    "member dikeluarkan.\n"
-    "5. Member yang keluar sendiri dari target otomatis di-ban dari target itu.\n"
-    "6. Pesan verifikasi yang bot kirim di dalam grup otomatis terhapus begitu "
-    "verifikasinya selesai atau waktunya habis, biar grup tidak penuh.\n\n"
+    "2. User langsung diterima otomatis — TIDAK ada verifikasi nomor HP, tidak ada "
+    "pesan verifikasi, tidak ada batas waktu.\n"
+    "3. Data membernya (nama, username, ID, foto profil, bio, status Premium, "
+    "bahasa, riwayat nama/username) tercatat di topik log target masing-masing.\n"
+    "4. Member yang keluar sendiri dari target otomatis di-ban dari target itu.\n"
+    "5. User yang ter-ban global tetap ditolak/di-ban di semua jalur join.\n\n"
     "_Daftarkan link invite mentah sebuah target: kirim link-nya ke chat pribadi bot, "
     "bot akan membalas link gerbangnya._"
 )
@@ -367,9 +413,10 @@ async def setbanlog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     store.set_setting("ban_thread_id", message.message_thread_id)
     await message.reply_text(
-        "✅ Topik ini ditetapkan sebagai **topik khusus log ban**. Semua catatan ban, "
-        "unban, sapuan daftar ban, upaya join user ter-ban, dan member keluar yang "
-        "otomatis di-ban akan masuk ke sini, terpisah dari log verifikasi.",
+        "✅ Topik ini ditetapkan sebagai **topik khusus log ban global**. Catatan ban "
+        "global, unban, sapuan daftar ban, dan upaya join user ter-ban global "
+        "akan masuk ke sini. (Ban-keluar punya topiknya sendiri — /setlogkeluar; "
+        "file sapuan juga topik sendiri — /setfilebanlog.)",
         parse_mode="Markdown")
 
 
@@ -386,10 +433,10 @@ async def setlogkeluar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     store.set_setting("leaveban_thread_id", message.message_thread_id)
     await message.reply_text(
-        "✅ Topik ini ditetapkan sebagai **topik khusus log ban-keluar**. Catatan "
-        "member yang keluar sendiri lalu otomatis di-ban, dan upaya join user "
-        "ban-keluar yang digagalkan, akan masuk ke sini — terpisah dari log ban "
-        "global supaya tidak kecampur.",
+        "✅ Topik ini ditetapkan sebagai **topik khusus log ban-keluar** — SATU topik "
+        "yang sama untuk SEMUA target. Catatan member dari target mana pun yang "
+        "keluar sendiri lalu otomatis di-ban, dan upaya join user ban-keluar yang "
+        "digagalkan, semuanya masuk ke sini (bukan ke topik target masing-masing).",
         parse_mode="Markdown")
 
 
@@ -645,7 +692,7 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💾 *Backup DATA BAN* selesai (cuma data ban, bukan seluruh data bot).\n"
             f"Isi: {summary['banned']} user ter-ban global (beserta data membernya) "
             f"dan {summary['leave_bans']} catatan ban-karena-keluar.\n\n"
-            "Simpan file ini baik-baik — isinya termasuk nomor HP member yang ter-ban. "
+            "Simpan file ini baik-baik — isinya termasuk data member yang ter-ban. "
             "Untuk memindahkan daftar ban ke bot lain: kirim file ini ke chat pribadi "
             "bot tujuan dan konfirmasi — daftar bannya digabung ke sana dan langsung "
             "diterapkan ke target-target bot tujuan."),
@@ -878,6 +925,12 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 # (bukan pesan chat, bukan DM owner).
                 await service.send_sweep_file(
                     context.bot, store, owner_id, chat.id, raw_title, sweep)
+        if became_admin and chat.id != store.get_setting("log_group_id"):
+            # Target baru: buatkan topik log-nya di grup log + pasangkan
+            # otomatis (meniru grup log bot fsub) — owner tidak perlu lagi
+            # membuat topik manual & /pasang.
+            await service.ensure_target_topic(
+                context.bot, store, chat.id, getattr(chat, "title", "") or "")
         return  # event soal status bot sendiri; cukup untuk registrasi target
 
     if user.is_bot:
@@ -891,14 +944,3 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await service.handle_member_left(
             context.bot, store, _owner_id(context), chat, user)
 
-
-# --------------------------------------------------------------------------- #
-# Contact                                                                      #
-# --------------------------------------------------------------------------- #
-
-async def contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != ChatType.PRIVATE or not update.message.contact:
-        return
-    user = update.effective_user
-    await service.handle_contact(context.bot, _store(context),
-                                 _owner_id(context), user, update.message.contact)
