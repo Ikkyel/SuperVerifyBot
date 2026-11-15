@@ -17,32 +17,6 @@ import service
 
 log = logging.getLogger("verifybot.handlers")
 
-OWNER_HELP = (
-    "Perintah admin:\n"
-    "/targets — daftar channel/grup target yang dijaga bot + status topik log-nya\n"
-    "/gerbang — daftar link gerbang semua target (buat disebar ke user)\n"
-    "/setlog — jalankan di dalam grup log (forum) untuk menetapkan grup itu sebagai tujuan log\n"
-    "/buattopik — buatkan topik log untuk semua target yang belum punya (otomatis juga tiap target baru)\n"
-    "/pasang — jalankan di dalam topik grup log, lalu pilih target untuk topik itu\n"
-    "/help — bantuan lengkap (daftar perintah + keterangan + alur)\n"
-    "/start — info bot\n"
-    "/setbanlog — jalankan di dalam topik grup log untuk menjadikannya topik khusus log ban\n"
-    "/logfile — keluarkan kumpulan log target tanpa topik sebagai file .txt ke grup log\n"
-    "/setfilebanlog — jalankan di dalam topik grup log untuk menjadikannya topik khusus file data ban global\n"
-    "/ekstrak — reply file .txt hasil bot dengan perintah ini: isinya diekstrak jadi pesan chat di topik baru\n"
-    "/setlogkeluar — jalankan di dalam topik grup log untuk menjadikannya topik khusus log ban-keluar\n"
-    "/ban <id_user> — blokir user dari bot + ban dari semua channel/grup target\n"
-    "/unban <id_user> — cabut blokir + unban di semua target\n"
-    "/daftarban — daftar user yang sedang diblokir\n"
-    "/tambahadmin <id_user> — angkat admin baru (khusus owner)\n"
-    "/hapusadmin <id_user> — cabut admin (khusus owner)\n"
-    "/daftaradmin — daftar owner + admin bot (khusus owner)\n"
-    "/backup — unduh file backup DATA BAN saja (JSON) untuk dipindah ke bot lain (khusus owner)\n\n"
-    "Daftarkan link invite mentah sebuah target: cukup kirim link-nya ke sini "
-    "(chat pribadi dengan bot), bot akan menyimpannya dan membalas link gerbangnya."
-)
-
-
 def _store(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data["store"]
 
@@ -80,7 +54,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if _is_admin(update, context):
         await update.message.reply_text(
-            "Halo Owner 👋 Bot verifikasi member aktif.\n\n" + OWNER_HELP)
+            _dashboard_text(store), parse_mode="HTML",
+            reply_markup=_dashboard_keyboard())
         return
 
     if store.is_banned(user.id):
@@ -97,18 +72,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     targets = [t for t in store.list_targets()
                if t["_id"] != store.get_setting("log_group_id")]
     text = (
-        "Halo 👋 Aku bot penjaga channel/grup.\n"
-        "Kalau kamu join ke channel/grup yang aku jaga, kamu langsung diterima — "
-        "nggak ada verifikasi apa pun yang perlu kamu lakukan. Aku cuma mencatat "
-        "data member buat admin.")
+        "👋 <b>Halo, selamat datang!</b>\n\n"
+        "Aku bot penjaga channel/grup di sini 🛡️\n"
+        "Kalau kamu join ke channel/grup yang aku jaga, kamu <b>langsung "
+        "diterima</b> — nggak ada verifikasi dan nggak perlu kirim apa-apa. "
+        "Aku cuma mencatat data member buat admin.")
     if targets:
-        text += "\n\nMau masuk ke salah satu target? Pilih di bawah ini, nanti aku kasih tombol masuknya:"
+        text += ("\n\n🎯 <b>Mau masuk ke salah satu target?</b>\n"
+                 "Pilih di bawah ini, nanti aku kasih tombol masuknya 👇")
         buttons = [[InlineKeyboardButton(f"🎯 {t.get('title') or t['_id']}",
                                          callback_data=f"gw:{t['_id']}")]
                    for t in targets]
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await update.message.reply_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.message.reply_text(text + " Nggak ada yang perlu dilakukan sekarang kok.")
+        await update.message.reply_text(
+            text + "\n\nSaat ini belum ada target yang bisa dimasuki lewat "
+            "aku. Kalau kamu dikasih link masuk khusus, klik link itu aja ya 👍",
+            parse_mode="HTML")
 
 
 async def targets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,7 +185,11 @@ HELP_TEXT = (
     "• /help — tampilkan bantuan ini\n"
     "• /targets — daftar channel/grup yang dijaga bot + status pairing topik log-nya\n"
     "• /gerbang — daftar link gerbang semua target (link yang disebar ke user)\n"
-    "• /daftarban — daftar user yang sedang di-ban global\n\n"
+    "• /daftarban — daftar user yang sedang di-ban global\n"
+    "• /bankeluar — saklar *ban-keluar* (chat pribadi): posisi awal OFF (member keluar "
+    "hanya dicatat, tidak di-ban); kalau dinyalakan, member yang keluar sendiri dari "
+    "target langsung di-ban dari target itu dan join lagi ditolak. Berlaku untuk "
+    "semua target sekaligus\n\n"
     "*Perintah yang dipakai di dalam grup log:*\n"
     "• /setlog — jalankan di grup log untuk menetapkan grup itu sebagai tujuan log "
     "(cukup sekali, di General)\n"
@@ -228,8 +213,9 @@ HELP_TEXT = (
     "bot membuat topik baru dan memposting isi file sebagai pesan chat di sana; "
     "kalau bot tidak bisa membuat topik, pakai /tempel di topik tujuan\n"
     "• /setlogkeluar — jalankan *di dalam sebuah topik* untuk menjadikannya topik khusus log "
-    "ban-keluar — SATU topik yang sama untuk SEMUA target (member keluar yang otomatis "
-    "di-ban + upaya joinnya yang digagalkan), terpisah dari log ban global\n\n"
+    "keluar — SATU topik yang sama untuk SEMUA target (member yang keluar dari target mana "
+    "pun dicatat di sini; member TIDAK di-ban, hanya dicatat keluarnya), terpisah dari log "
+    "ban global\n\n"
     "*Kelola admin (khusus owner, chat pribadi):*\n"
     "• /tambahadmin <id_user> — angkat user jadi admin bot\n"
     "• /hapusadmin <id_user> — cabut status admin user\n"
@@ -426,17 +412,17 @@ async def setlogkeluar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     store = _store(context)
     chat, message = update.effective_chat, update.message
     if chat.id != store.get_setting("log_group_id"):
-        await message.reply_text("/setlogkeluar dipakai di dalam grup log ya (di topik khusus log ban-keluar).")
+        await message.reply_text("/setlogkeluar dipakai di dalam grup log ya (di topik khusus log keluar).")
         return
     if not message.message_thread_id or message.is_topic_message is not True:
         await message.reply_text("/setlogkeluar harus dijalankan di DALAM sebuah topik, bukan di General.")
         return
     store.set_setting("leaveban_thread_id", message.message_thread_id)
     await message.reply_text(
-        "✅ Topik ini ditetapkan sebagai **topik khusus log ban-keluar** — SATU topik "
+        "✅ Topik ini ditetapkan sebagai **topik khusus log keluar** — SATU topik "
         "yang sama untuk SEMUA target. Catatan member dari target mana pun yang "
-        "keluar sendiri lalu otomatis di-ban, dan upaya join user ban-keluar yang "
-        "digagalkan, semuanya masuk ke sini (bukan ke topik target masing-masing).",
+        "keluar sendiri semuanya masuk ke sini (bukan ke topik target "
+        "masing-masing). Member yang keluar TIDAK di-ban — ini hanya catatan.",
         parse_mode="Markdown")
 
 
@@ -599,10 +585,10 @@ async def _post_extract(context, chat_id: int, thread_id: int, parsed: dict):
         header += "\n\n" + service._md_escape(parsed["intro"])
     await context.bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
                                    text=header[:4000], parse_mode="Markdown",
-                                   protect_content=True)
+)
     for entry in parsed["entries"]:
         await context.bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
-                                       text=entry[:4000], protect_content=True)
+                                       text=entry[:4000])
     await context.bot.send_message(
         chat_id=chat_id, message_thread_id=thread_id,
         text=f"— Selesai: {len(parsed['entries'])} entri diekstrak dari file "
@@ -678,6 +664,483 @@ async def tempel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Backup / restore (KHUSUS owner)                                              #
 # --------------------------------------------------------------------------- #
 
+def _bankeluar_status_text(store) -> str:
+    if service.leave_ban_enabled(store):
+        status = ("🟢 *ON* — member yang keluar sendiri dari sebuah target langsung "
+                  "di-ban dari target itu, dan join lagi ke sana ditolak.")
+    else:
+        status = ("🔴 *OFF* — member yang keluar sendiri TIDAK di-ban; bot hanya "
+                  "mencatat keluarnya ke log keluar.")
+    return ("🚪 *Ban-Keluar* (keluar sendiri = di-ban dari target)\n\n"
+            f"Status sekarang: {status}\n\n"
+            "Saklar ini berlaku untuk SEMUA target sekaligus dan langsung "
+            "berlaku tanpa restart. Mematikan saklar (dari ON ke OFF) "
+            "otomatis mencabut semua ban-keluar yang dipasang bot — user "
+            "yang ter-ban global tidak ikut dilepas. Catatan ban-keluar "
+            "yang terlanjur dicabut tidak kembali — saklar hanya berlaku "
+            "untuk yang keluar setelah dinyalakan.")
+
+
+def _bankeluar_keyboard(store) -> InlineKeyboardMarkup:
+    if service.leave_ban_enabled(store):
+        toggle = InlineKeyboardButton("🔴 Matikan ban-keluar", callback_data="bk:off")
+    else:
+        toggle = InlineKeyboardButton("🟢 Nyalakan ban-keluar", callback_data="bk:on")
+    return InlineKeyboardMarkup([
+        [toggle],
+        [InlineKeyboardButton("⬅️ Dasbor", callback_data="dash:home")],
+    ])
+
+
+async def _set_bankeluar(context: ContextTypes.DEFAULT_TYPE, store, on: bool):
+    """Ubah saklar ban-keluar; kembalikan catatan hasil (string, bisa kosong).
+
+    Perpindahan ON -> OFF sekalian MEMBERSIHKAN: semua catatan ban-keluar
+    dihapus + ban Telegram yang dipasang bot dilepas (permintaan owner
+    2026-11-15 malam) — kecuali user ter-ban global, yang tidak dilepas.
+    """
+    was_on = service.leave_ban_enabled(store)
+    store.set_setting("leave_ban_enabled", bool(on))
+    note = ""
+    cleared = None
+    if was_on and not on:
+        try:
+            cleared = await service.clear_leave_bans(context.bot, store)
+        except Exception:
+            cleared = None
+        if cleared and cleared.get("cleared"):
+            note = (f"\n\n🧹 Sekalian dibersihkan: {cleared['cleared']} catatan "
+                    f"ban-keluar dihapus, {cleared['unbanned']} ban Telegram "
+                    "yang dipasang bot dilepas.")
+    try:
+        await service.send_ban_log(
+            context.bot, store, _owner_id(context),
+            ("🟢 <b>Ban-keluar DINYALAKAN</b> — mulai sekarang member yang "
+             "keluar sendiri dari target akan di-ban dari target itu."
+             if on else
+             "🔴 <b>Ban-keluar DIMATIKAN</b> — mulai sekarang member yang "
+             "keluar sendiri dari target TIDAK di-ban, hanya dicatat."
+             + (f" Semua ban-keluar yang dipasang bot dicabut sekalian "
+                f"({cleared['cleared']} catatan dihapus, {cleared['unbanned']} "
+                "ban dilepas)." if cleared and cleared.get("cleared") else "")),
+            kind="keluar")
+    except Exception:
+        pass  # pencatatan saklar bersifat tambahan; jangan gagalkan perintah
+    return note
+
+
+async def bankeluar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update, context) or update.effective_chat.type != ChatType.PRIVATE:
+        return
+    store = _store(context)
+    args = context.args or []
+    note = ""
+    if args and args[0].lower() in ("on", "off"):
+        note = await _set_bankeluar(context, store, args[0].lower() == "on")
+    await update.message.reply_text(
+        _bankeluar_status_text(store) + note, parse_mode="Markdown",
+        reply_markup=_bankeluar_keyboard(store))
+
+
+async def bankeluar_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(update, context):
+        await query.answer("Khusus admin bot.", show_alert=True)
+        return
+    store = _store(context)
+    on = query.data == "bk:on"
+    note = await _set_bankeluar(context, store, on)
+    await query.answer("Ban-keluar " + ("dinyalakan 🟢" if on else "dimatikan 🔴"))
+    await query.edit_message_text(
+        _bankeluar_status_text(store) + note, parse_mode="Markdown",
+        reply_markup=_bankeluar_keyboard(store))
+
+
+# --------------------------------------------------------------------------- #
+# Dasbor admin — menu inline di /start (khusus owner/admin, chat pribadi)      #
+# --------------------------------------------------------------------------- #
+
+def _dashboard_text(store) -> str:
+    targets = [t for t in store.list_targets()
+               if t["_id"] != store.get_setting("log_group_id")]
+    log_status = ("terpasang ✅" if store.get_setting("log_group_id")
+                  else "BELUM dipasang ⚠️")
+    bk = "🟢 ON" if service.leave_ban_enabled(store) else "🔴 OFF"
+    return (
+        "🛡️ <b>Dasbor Bot Security</b>\n\n"
+        "📊 <b>Ringkasan:</b>\n"
+        f"🎯 Target dijaga: <b>{len(targets)}</b>\n"
+        f"🚫 Ban global aktif: <b>{len(store.list_banned())}</b> user\n"
+        f"👮 Admin bot: <b>{len(store.list_admins()) + 1}</b> (termasuk owner)\n"
+        f"📋 Grup log: {log_status}\n"
+        f"🚪 Ban-keluar: {bk}\n\n"
+        "Pilih menu di bawah ini 👇")
+
+
+def _dashboard_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎯 Target & Gerbang", callback_data="dash:targets"),
+         InlineKeyboardButton("🚫 Ban & Admin", callback_data="dash:ban")],
+        [InlineKeyboardButton("📋 Log & Topik", callback_data="dash:log"),
+         InlineKeyboardButton("💾 Backup & Bantuan", callback_data="dash:extra")],
+    ])
+
+
+def _back_row(callback_data: str = "dash:home"):
+    return [InlineKeyboardButton("⬅️ Kembali", callback_data=callback_data)]
+
+
+async def _dash_edit(query, text, keyboard, parse_mode="HTML"):
+    try:
+        await query.edit_message_text(text, parse_mode=parse_mode,
+                                      reply_markup=keyboard)
+    except Exception:
+        pass  # isi tidak berubah / batas Telegram — abaikan
+
+
+def _dash_targets_view(store, bot_username: str):
+    targets = [t for t in store.list_targets()
+               if t["_id"] != store.get_setting("log_group_id")]
+    if not targets:
+        text = ("🎯 <b>Target &amp; Gerbang</b>\n\nBelum ada target terdaftar. "
+                "Target terdaftar otomatis saat bot dijadikan admin di "
+                "channel/grup, atau saat ada member join lewat bot.")
+        return text, InlineKeyboardMarkup([_back_row()])
+    lines = ["🎯 <b>Target &amp; Gerbang</b>\n"]
+    rows = []
+    for t in targets:
+        topik = (f"topik {t['thread_id']}" if t.get("thread_id")
+                 else "topik belum dipasang")
+        lines.append(f"• <b>{service._esc(t.get('title') or t['_id'])}</b> — {topik}")
+        rows.append([InlineKeyboardButton(
+            f"🔗 Link gerbang: {t.get('title') or t['_id']}",
+            url=service.gateway_link(bot_username, t["_id"]))])
+    lines.append("\nTap tombol link gerbang buat membuka/menyalin link yang "
+                 "kamu sebar ke user.")
+    rows.append(_back_row())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _dash_ban_view(store):
+    bk = "🟢 ON" if service.leave_ban_enabled(store) else "🔴 OFF"
+    text = (
+        "🚫 <b>Ban &amp; Admin</b>\n\n"
+        f"🚪 Ban-keluar sekarang: <b>{bk}</b>\n"
+        f"🚫 Ban global aktif: <b>{len(store.list_banned())}</b> user\n"
+        f"👮 Admin bot: <b>{len(store.list_admins()) + 1}</b> (termasuk owner)\n\n"
+        "Tap Ban/Unban buat mulai — bot akan minta ID user-nya, lalu "
+        "konfirmasi dulu sebelum dieksekusi.")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 Ban User", callback_data="dashact:ban"),
+         InlineKeyboardButton("♻️ Unban User", callback_data="dashact:unban")],
+        [InlineKeyboardButton("📋 Daftar Ban", callback_data="dash:banlist"),
+         InlineKeyboardButton("🚪 Ban-Keluar", callback_data="dash:bankeluar")],
+        [InlineKeyboardButton("👮 Kelola Admin", callback_data="dash:admins")],
+        _back_row(),
+    ])
+    return text, kb
+
+
+def _dash_banlist_view(store):
+    banned = store.list_banned()
+    if not banned:
+        text = "🚫 <b>Daftar Ban Global</b>\n\nKosong — belum ada user yang diblokir."
+    else:
+        lines = [f"🚫 <b>Daftar Ban Global ({len(banned)} user):</b>\n"]
+        for u in banned[:30]:
+            uname = f" @{service._esc(u['username'])}" if u.get("username") else ""
+            lines.append(
+                f"• {service._profile_anchor(u['_id'], u.get('name') or '-')} "
+                f"(<code>{u['_id']}</code>){uname}")
+        if len(banned) > 30:
+            lines.append(f"\n… dan {len(banned) - 30} user lainnya (lihat /daftarban).")
+        text = "\n".join(lines)
+    return text, InlineKeyboardMarkup([_back_row("dash:ban")])
+
+
+def _dash_admins_view(store, owner_id: int):
+    owner_doc = store.get_user(owner_id) or {}
+    lines = ["👮 <b>Kelola Admin</b>\n",
+             f"👑 Owner: {service._profile_anchor(owner_id, owner_doc.get('name') or 'Owner')} "
+             f"(<code>{owner_id}</code>)"]
+    admins = store.list_admins()
+    if admins:
+        lines.append("\n<b>Admin tambahan:</b>")
+        for a in admins:
+            doc = store.get_user(a["_id"]) or {}
+            lines.append(
+                f"• {service._profile_anchor(a['user_id'], doc.get('name') or '-')} "
+                f"(<code>{a['user_id']}</code>)")
+    else:
+        lines.append("\nBelum ada admin tambahan.")
+    lines.append("\nTambah/hapus admin khusus owner — bot akan minta ID "
+                 "user-nya lalu konfirmasi.")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Tambah Admin", callback_data="dashact:addadmin"),
+         InlineKeyboardButton("➖ Hapus Admin", callback_data="dashact:deladmin")],
+        _back_row("dash:ban"),
+    ])
+    return "\n".join(lines), kb
+
+
+def _dash_log_view(store):
+    def _topic_label(setting_key):
+        thread = store.get_setting(setting_key)
+        return f"terpasang (topik {thread})" if thread else "belum dipasang"
+    targets = [t for t in store.list_targets()
+               if t["_id"] != store.get_setting("log_group_id")]
+    paired = sum(1 for t in targets if t.get("thread_id"))
+    log_group = store.get_setting("log_group_id")
+    text = (
+        "📋 <b>Log &amp; Topik</b>\n\n"
+        f"🗂 Grup log: {f'<code>{log_group}</code>' if log_group else 'BELUM dipasang ⚠️ — jalankan /setlog di grup log'}\n"
+        f"🚫 Topik Log Ban: {_topic_label('ban_thread_id')}\n"
+        f"🚪 Topik Log Keluar: {_topic_label('leaveban_thread_id')}\n"
+        f"📁 Topik File Ban Global: {_topic_label('fileban_thread_id')}\n"
+        f"🎯 Topik target: {paired} dari {len(targets)} target terpasang\n\n"
+        "Tombol di bawah membuatkan semua topik yang belum ada (target + "
+        "ban) sekaligus. Memindahkan topik tetap lewat /setbanlog, "
+        "/setlogkeluar, /setfilebanlog, atau /pasang di topik tujuan.")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("♻️ Buat Topik Otomatis", callback_data="dashact:topics")],
+        _back_row(),
+    ])
+    return text, kb
+
+
+def _dash_extra_view(store):
+    text = (
+        "💾 <b>Backup &amp; Bantuan</b>\n\n"
+        "💾 <b>Backup Data Ban</b> — unduh file JSON berisi daftar ban global "
+        "(khusus owner). File-nya bisa dikirim ke bot lain buat restore.\n\n"
+        "❓ <b>Bantuan</b> — panduan lengkap semua perintah &amp; cara kerja bot.")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💾 Backup Data Ban", callback_data="dashact:backup")],
+        [InlineKeyboardButton("❓ Bantuan", callback_data="dash:help")],
+        _back_row(),
+    ])
+    return text, kb
+
+
+_DASH_ACTIONS = {
+    "ban": ("🚫 <b>Ban User (global)</b>", "user yang mau di-ban global"),
+    "unban": ("♻️ <b>Unban User</b>", "user yang mau dicabut ban globalnya"),
+    "addadmin": ("➕ <b>Tambah Admin</b>", "user yang mau diangkat jadi admin bot"),
+    "deladmin": ("➖ <b>Hapus Admin</b>", "admin yang mau dicabut status adminnya"),
+}
+
+
+async def dashboard_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    if not _is_admin(update, context):
+        await query.answer("Khusus admin bot.", show_alert=True)
+        return
+    store = _store(context)
+    data = query.data or ""
+
+    if data == "dash:cancel":
+        context.user_data.pop("dash_pending", None)
+        await query.answer("Dibatalkan")
+        try:
+            await query.edit_message_text("❌ Dibatalkan.")
+        except Exception:
+            pass
+        return
+
+    if data.startswith("dashcf:"):
+        await _dash_confirm_cb(update, context, data)
+        return
+
+    if data.startswith("dashact:"):
+        await _dash_action_cb(update, context, data)
+        return
+
+    await query.answer()
+    if data == "dash:home":
+        await _dash_edit(query, _dashboard_text(store), _dashboard_keyboard())
+    elif data == "dash:targets":
+        text, kb = _dash_targets_view(store, context.bot.username or "")
+        await _dash_edit(query, text, kb)
+    elif data == "dash:ban":
+        text, kb = _dash_ban_view(store)
+        await _dash_edit(query, text, kb)
+    elif data == "dash:bankeluar":
+        await _dash_edit(query, _bankeluar_status_text(store),
+                         _bankeluar_keyboard(store), parse_mode="Markdown")
+    elif data == "dash:banlist":
+        text, kb = _dash_banlist_view(store)
+        await _dash_edit(query, text, kb)
+    elif data == "dash:admins":
+        text, kb = _dash_admins_view(store, _owner_id(context))
+        await _dash_edit(query, text, kb)
+    elif data == "dash:log":
+        text, kb = _dash_log_view(store)
+        await _dash_edit(query, text, kb)
+    elif data == "dash:extra":
+        text, kb = _dash_extra_view(store)
+        await _dash_edit(query, text, kb)
+    elif data == "dash:help":
+        await _dash_edit(query, HELP_TEXT,
+                         InlineKeyboardMarkup([_back_row("dash:extra")]),
+                         parse_mode="Markdown")
+
+
+async def _dash_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                          data: str):
+    query = update.callback_query
+    store = _store(context)
+    action = data.split(":", 1)[1]
+
+    if action == "topics":
+        ban_made = await service.ensure_ban_topics(context.bot, store)
+        made = await service.ensure_all_target_topics(context.bot, store)
+        await query.answer(
+            f"♻️ Selesai — topik baru dibuat: {ban_made} topik ban, "
+            f"{made} topik target.", show_alert=True)
+        text, kb = _dash_log_view(store)
+        await _dash_edit(query, text, kb)
+        return
+
+    if action == "backup":
+        if not _is_owner(update, context):
+            await query.answer("Backup khusus owner.", show_alert=True)
+            return
+        payload_data = store.export_bans()
+        summary = service.validate_backup(payload_data)
+        payload = json.dumps(payload_data, ensure_ascii=False, indent=1).encode("utf-8")
+        stamp = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y%m%d-%H%M%S")
+        await context.bot.send_document(
+            chat_id=query.message.chat_id,
+            document=InputFile(io.BytesIO(payload),
+                               filename=f"verifybot-databan-{stamp}.json"),
+            caption=(f"💾 Backup DATA BAN — {summary['banned']} user ter-ban "
+                     "global beserta data membernya. Simpan baik-baik ya."),
+            parse_mode="Markdown")
+        await query.answer("💾 File backup dikirim di bawah dasbor ini.")
+        return
+
+    if action in ("addadmin", "deladmin") and not _is_owner(update, context):
+        await query.answer("Kelola admin khusus owner.", show_alert=True)
+        return
+    if action not in _DASH_ACTIONS:
+        await query.answer()
+        return
+    title, who = _DASH_ACTIONS[action]
+    context.user_data["dash_pending"] = action
+    await query.answer()
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=(f"{title}\n\nKirim <b>ID Telegram</b> {who} ke sini.\n"
+              "ID bisa kamu lihat di log (baris 🆔 ID — tap buat menyalin)."),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Batal", callback_data="dash:cancel")]]))
+
+
+async def _dash_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                           data: str):
+    query = update.callback_query
+    store = _store(context)
+    _, action, raw_id = data.split(":", 2)
+    user_id = int(raw_id)
+    owner_id = _owner_id(context)
+
+    if action in ("addadmin", "deladmin") and not _is_owner(update, context):
+        await query.answer("Kelola admin khusus owner.", show_alert=True)
+        return
+
+    if action == "ban":
+        await service.ban_user(context.bot, store, user_id)
+        result = (f"✅ Selesai — user <code>{user_id}</code> sudah di-<b>ban "
+                  "global</b>: diblokir dari bot + di-ban dari semua target. "
+                  "Laporan lengkapnya ada di topik Log Ban.")
+    elif action == "unban":
+        await service.unban_user(context.bot, store, user_id)
+        result = (f"✅ Selesai — ban global user <code>{user_id}</code> sudah "
+                  "dicabut di bot dan di semua target.")
+    elif action == "addadmin":
+        store.add_admin(user_id, added_by=owner_id)
+        result = (f"✅ Selesai — user <code>{user_id}</code> sekarang admin "
+                  "bot. Dia bisa memakai perintah operasional, tapi tidak "
+                  "bisa mengelola admin dan tidak bisa di-ban.")
+    elif action == "deladmin":
+        store.remove_admin(user_id)
+        result = (f"✅ Selesai — status admin user <code>{user_id}</code> "
+                  "sudah dicabut.")
+    else:
+        await query.answer()
+        return
+    await query.answer("Berhasil ✅")
+    await _dash_edit(query, result,
+                     InlineKeyboardMarkup([_back_row("dash:ban")]))
+
+
+async def dash_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pesan teks DM: kalau sedang ada alur dasbor yang menunggu ID, proses
+    sebagai ID; selain itu teruskan ke handler link gerbang seperti biasa."""
+    pending = context.user_data.get("dash_pending") if context.user_data else None
+    if not pending or not _is_admin(update, context):
+        await owner_link_message(update, context)
+        return
+    store = _store(context)
+    message = update.message
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.reply_text(
+            "ID harus berupa angka ya. Kirim ID Telegram-nya, atau tap "
+            "❌ Batal di pesan tadi kalau berubah pikiran.")
+        return
+    user_id = int(raw)
+    context.user_data.pop("dash_pending", None)
+    owner_id = _owner_id(context)
+    title, _who = _DASH_ACTIONS[pending]
+
+    problem = None
+    if pending == "ban":
+        if user_id == owner_id:
+            problem = "Itu ID owner — owner tidak bisa di-ban 😄"
+        elif store.is_admin(user_id):
+            problem = ("User itu admin bot — cabut dulu status adminnya "
+                       "lewat Kelola Admin, baru bisa di-ban.")
+        elif store.is_banned(user_id):
+            problem = f"User <code>{user_id}</code> sudah ter-ban global kok."
+    elif pending == "unban":
+        if not store.is_banned(user_id):
+            problem = f"User <code>{user_id}</code> tidak sedang ter-ban global."
+    elif pending == "addadmin":
+        if user_id == owner_id:
+            problem = "Owner sudah admin tertinggi, nggak perlu ditambahkan 😄"
+        elif store.is_admin(user_id):
+            problem = f"User <code>{user_id}</code> sudah jadi admin bot."
+    elif pending == "deladmin":
+        if user_id == owner_id:
+            problem = "Owner tidak bisa dicabut statusnya 😄"
+        elif not store.is_admin(user_id) or user_id == owner_id:
+            problem = f"User <code>{user_id}</code> bukan admin tambahan."
+    if problem:
+        await message.reply_text(problem, parse_mode="HTML")
+        return
+
+    doc = store.get_user(user_id) or {}
+    name_line = ""
+    if doc.get("name"):
+        name_line = (f"\n👤 Dari catatan bot: "
+                     f"{service._profile_anchor(user_id, doc['name'])}"
+                     + (f" (@{service._esc(doc['username'])})"
+                        if doc.get("username") else ""))
+    await message.reply_text(
+        f"{title}\n\n🆔 ID: <code>{user_id}</code>{name_line}\n\n"
+        "Yakin mau lanjut?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Ya, lanjutkan",
+                                  callback_data=f"dashcf:{pending}:{user_id}")],
+            [InlineKeyboardButton("❌ Batal", callback_data="dash:cancel")],
+        ]))
+
+
 async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_owner(update, context) or update.effective_chat.type != ChatType.PRIVATE:
         return
@@ -690,8 +1153,7 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=InputFile(io.BytesIO(payload), filename=f"verifybot-databan-{stamp}.json"),
         caption=(
             "💾 *Backup DATA BAN* selesai (cuma data ban, bukan seluruh data bot).\n"
-            f"Isi: {summary['banned']} user ter-ban global (beserta data membernya) "
-            f"dan {summary['leave_bans']} catatan ban-karena-keluar.\n\n"
+            f"Isi: {summary['banned']} user ter-ban global (beserta data membernya).\n\n"
             "Simpan file ini baik-baik — isinya termasuk data member yang ter-ban. "
             "Untuk memindahkan daftar ban ke bot lain: kirim file ini ke chat pribadi "
             "bot tujuan dan konfirmasi — daftar bannya digabung ke sana dan langsung "
@@ -727,8 +1189,7 @@ async def restore_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await update.message.reply_text(
         "♻️ *File backup data ban terbaca.* Isinya:\n"
-        f"• {summary['banned']} user ter-ban global (beserta data membernya)\n"
-        f"• {summary['leave_bans']} catatan ban-karena-keluar\n\n"
+        f"• {summary['banned']} user ter-ban global (beserta data membernya)\n\n"
         "Daftar ban ini akan *DIGABUNG* ke bot ini (data lain tidak berubah) dan "
         "langsung diterapkan ke target-target bot ini. Lanjutkan?",
         reply_markup=keyboard, parse_mode="Markdown")
@@ -743,24 +1204,16 @@ async def restore_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "yes" and data is not None:
         store = _store(context)
         result = store.import_bans(data)
-        # Tegakkan langsung: ban global ke semua target bot ini, ban-keluar
-        # ke target asal masing-masing.
+        # Tegakkan langsung: ban global ke semua target bot ini.
         for banned_id in result["banned_ids"]:
             await service.ban_user(context.bot, store, banned_id)
-        for left_user_id, left_chat_id in result["leave_ban_pairs"]:
-            try:
-                await context.bot.ban_chat_member(chat_id=left_chat_id,
-                                                  user_id=left_user_id)
-            except Exception:
-                pass  # bot mungkin belum admin di target itu; sapuan saat jadi admin menutupinya sebagian (khusus ban global)
         await query.answer("Daftar ban tergabung ✅")
         await query.edit_message_text(
             "♻️ *Restore data ban selesai.* Yang digabungkan ke bot ini:\n"
             f"• {result['banned_users']} user ter-ban global — sudah langsung di-ban "
-            "dari semua target bot ini\n"
-            f"• {result['leave_bans']} catatan ban-karena-keluar — sudah diterapkan "
-            "ke target asalnya\n\n"
-            "Data lain (target, admin, settings, riwayat) tidak berubah.",
+            "dari semua target bot ini\n\n"
+            "Data lain (target, admin, settings, riwayat) tidak berubah. "
+            "(Catatan ban-keluar di backup lama diabaikan — fitur itu sudah dicabut.)",
             parse_mode="Markdown")
     else:
         await query.answer("Dibatalkan")

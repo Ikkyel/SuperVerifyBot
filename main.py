@@ -8,7 +8,7 @@ channel/grup private, dan:
   bahasa, riwayat nama/username — TANPA nomor HP) ke topik grup forum per
   target; target tanpa topik ditampung lalu dikeluarkan sebagai file .txt.
 - Penegakan yang tetap jalan: ban global (blokir senyap + ban semua target)
-  dan ban-keluar (member keluar sendiri otomatis di-ban dari target itu).
+  member keluar dari target hanya dicatat ke log keluar (tidak di-ban).
 
 Env: BOT_TOKEN, OWNER_ID, MONGODB_URI, LOG_GROUP_ID (opsional — bisa /setlog).
 """
@@ -31,6 +31,7 @@ from telegram.ext import (
 
 import db as dbmod
 import handlers
+import service
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s: %(message)s")
@@ -51,6 +52,18 @@ async def _post_init(app: Application):
     if stale:
         log.info("Startup: %s catatan pending sisa sistem lama dibersihkan.",
                  len(stale))
+    # Migrasi pencabutan ban-keluar lama — SEKALI SAJA (keputusan owner
+    # 2026-11-15 malam): catatan ban-keluar dari sistem lama dihapus +
+    # ban Telegram yang dipasang bot dilepas; ban global tidak disentuh.
+    # Ditandai flag setting supaya TIDAK jalan lagi di startup berikutnya:
+    # sejak ada saklar /bankeluar, catatan ban-keluar BARU yang dibuat
+    # saat saklar ON harus bertahan melewati restart.
+    if not store.get_setting("leave_ban_lifted_v1"):
+        try:
+            await service.clear_leave_bans(app.bot, store)
+            store.set_setting("leave_ban_lifted_v1", True)
+        except Exception as exc:
+            log.warning("Migrasi pencabutan ban-keluar gagal: %s", exc)
     log.info("Bot jalan (mode tanpa verifikasi). Target terdaftar: %s",
              len(store.list_targets()))
 
@@ -76,6 +89,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("ban", handlers.ban_cmd))
     app.add_handler(CommandHandler("unban", handlers.unban_cmd))
     app.add_handler(CommandHandler("daftarban", handlers.daftarban_cmd))
+    app.add_handler(CommandHandler("bankeluar", handlers.bankeluar_cmd))
+    app.add_handler(CallbackQueryHandler(handlers.bankeluar_cb, pattern=r"^bk:"))
     app.add_handler(CommandHandler("tambahadmin", handlers.tambahadmin_cmd))
     app.add_handler(CommandHandler("hapusadmin", handlers.hapusadmin_cmd))
     app.add_handler(CommandHandler("daftaradmin", handlers.daftaradmin_cmd))
@@ -84,6 +99,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("ekstrak", handlers.ekstrak_cmd))
     app.add_handler(CommandHandler("tempel", handlers.tempel_cmd))
     app.add_handler(CallbackQueryHandler(handlers.restore_cb, pattern=r"^restore:"))
+    app.add_handler(CallbackQueryHandler(handlers.dashboard_cb, pattern=r"^dash"))
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.Document.ALL, handlers.restore_document))
     app.add_handler(CommandHandler("setlog", handlers.setlog_cmd))
@@ -96,7 +112,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(handlers.glink_callback, pattern=r"^glink:"))
     app.add_handler(CallbackQueryHandler(handlers.gateway_pick_callback, pattern=r"^gw:"))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE,
-                                   handlers.owner_link_message))
+                                   handlers.dash_text_message))
     app.add_handler(ChatJoinRequestHandler(handlers.join_request))
     app.add_handler(ChatMemberHandler(handlers.chat_member_update,
                                       ChatMemberHandler.CHAT_MEMBER))

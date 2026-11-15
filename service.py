@@ -24,7 +24,11 @@ log = logging.getLogger("verifybot.service")
 # MODE TANPA VERIFIKASI (keputusan owner 2026-11-15): tidak ada lagi gerbang
 # nomor HP. Join request langsung di-approve, join langsung langsung diterima,
 # dan bot hanya MENCATAT data member (tanpa nomor HP) ke grup log. Yang tetap
-# ditegakkan: ban global & ban-keluar (user ter-ban tetap ditolak di pintu).
+# ditegakkan: ban global (user ter-ban tetap ditolak di pintu). Member
+# keluar dari target DEFAULT-nya tidak di-ban — hanya dicatat ke log
+# keluar bersama; tapi ada saklar ban-keluar (/bankeluar, setting
+# leave_ban_enabled) yang bila dinyalakan owner mengembalikan perilaku
+# lama: keluar sendiri = otomatis di-ban dari target itu.
 
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
@@ -197,6 +201,44 @@ def is_admin_id(store, owner_id: int, user_id: int) -> bool:
     return int(user_id) == int(owner_id) or store.is_admin(user_id)
 
 
+def leave_ban_enabled(store) -> bool:
+    """Saklar ban-keluar (diatur owner via /bankeluar). Default OFF:
+    member keluar hanya dicatat. ON: keluar sendiri = di-ban dari target
+    itu dan join lagi ditolak di semua jalur (perilaku lama)."""
+    return bool(store.get_setting("leave_ban_enabled", False))
+
+
+async def clear_leave_bans(bot, store) -> dict:
+    """Migrasi pencabutan ban-keluar (keputusan owner 2026-11-15 malam):
+    hapus SEMUA catatan ban-keluar lama + lepas ban Telegram yang pernah
+    dipasang BOT di target terkait (saat member keluar / saat upaya join
+    user ban-keluar digagalkan). Ban global TIDAK disentuh sama sekali;
+    ban yang bukan dipasang bot juga tidak disentuh (bot memang tidak
+    punya catatannya). Idempoten: sesudah bersih, pemanggilan berikutnya
+    tidak melakukan apa-apa. Dijalankan otomatis saat bot start."""
+    records = (store.export_bans() or {}).get("leave_bans") or []
+    unbanned = 0
+    for rec in records:
+        user_id, chat_id = rec.get("user_id"), rec.get("chat_id")
+        if user_id is None or chat_id is None:
+            continue
+        if store.is_banned(user_id):
+            continue  # ter-ban global: jangan dilepas di target mana pun
+        try:
+            await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+            unbanned += 1
+        except Exception as exc:
+            log.debug("Lepas ban-keluar %s di %s gagal: %s",
+                      user_id, chat_id, exc)
+    for user_id in {rec.get("user_id") for rec in records}:
+        if user_id is not None:
+            store.clear_left_bans(user_id)
+    if records:
+        log.info("Migrasi ban-keluar: %s catatan dihapus, %s ban Telegram "
+                 "dilepas.", len(records), unbanned)
+    return {"cleared": len(records), "unbanned": unbanned}
+
+
 async def apply_blacklist(bot, store, chat_id: int):
     """Terapkan SELURUH daftar ban ke satu chat (dipakai saat bot baru
     dijadikan admin di sana): member lama yang terdaftar langsung di-ban,
@@ -259,8 +301,7 @@ async def send_sweep_file(bot, store, owner_id: int, chat_id: int,
               "document": io.BytesIO(content.encode("utf-8")),
               "filename": filename,
               "caption": (f"🧹 File data ban global untuk {chat_title} — "
-                          f"{len(applied_ids)} user ter-ban diterapkan di sana."),
-              "protect_content": True}
+                          f"{len(applied_ids)} user ter-ban diterapkan di sana.")}
     thread_id = store.get_setting("fileban_thread_id")
     if thread_id:
         kwargs["message_thread_id"] = thread_id
@@ -281,9 +322,9 @@ async def send_sweep_file(bot, store, owner_id: int, chat_id: int,
 def ban_thread_id_for(store, kind: str):
     """Topik tujuan catatan ban menurut jenisnya, biar tidak kecampur:
     'global' -> topik log ban global (/setbanlog); 'keluar' -> topik log
-    ban-keluar (/setlogkeluar) — SATU topik yang sama untuk SEMUA target
-    (bukan per target) — jatuh ke topik ban global bila belum dipasang,
-    lalu ke General bila dua-duanya belum ada."""
+    keluar bersama (/setlogkeluar) — SATU topik yang sama untuk SEMUA
+    target (bukan per target) — jatuh ke topik ban global bila belum
+    dipasang, lalu ke General bila dua-duanya belum ada."""
     if kind == "keluar":
         return (store.get_setting("leaveban_thread_id")
                 or store.get_setting("ban_thread_id"))
@@ -294,12 +335,12 @@ async def send_ban_log(bot, store, owner_id: int, html_text: str, kind: str = "g
     """Kirim catatan peristiwa ban ke topiknya di grup log (menurut `kind`:
     'global' atau 'keluar'). Belum dipasang -> jatuh ke General grup log.
     Grup log belum diatur -> dilewati (owner tetap dapat laporan langsung
-    dari perintahnya). Isi dilindungi protect_content.
+    dari perintahnya).
     """
     log_group_id = store.get_setting("log_group_id")
     if not log_group_id:
         return False
-    base = {"chat_id": log_group_id, "protect_content": True}
+    base = {"chat_id": log_group_id}
     thread_id = ban_thread_id_for(store, kind)
     if thread_id:
         base["message_thread_id"] = thread_id
@@ -390,8 +431,7 @@ async def send_ban_report(bot, store, owner_id: int, title: str, user_id: int,
         photos = await bot.get_user_profile_photos(user_id, limit=1)
         if photos and getattr(photos, "total_count", 0) and photos.photos:
             photo_kwargs = {"chat_id": log_group_id,
-                            "photo": photos.photos[0][0].file_id,
-                            "protect_content": True}
+                            "photo": photos.photos[0][0].file_id}
             if thread_id:
                 photo_kwargs["message_thread_id"] = thread_id
             await bot.send_photo(**photo_kwargs)
@@ -406,10 +446,16 @@ async def send_ban_report(bot, store, owner_id: int, title: str, user_id: int,
 
 
 async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = None):
-    """Member keluar sendiri dari target -> otomatis di-ban dari target itu
-    (tidak bisa join lagi). Per target saja, bukan ban global bot.
+    """Member keluar sendiri dari target.
 
-    Dilewati: grup log, owner, bot lain, user yang sudah ter-ban global.
+    Saklar ban-keluar OFF (default, keputusan owner 2026-11-15 malam):
+    user TIDAK di-ban — bebas join lagi kapan pun; bot hanya MENCATAT
+    peristiwa keluarnya ke topik log keluar bersama. Saklar ON
+    (/bankeluar): perilaku lama — user langsung di-ban dari target itu
+    + laporan lengkap ke topik yang sama.
+
+    Dilewati: grup log, owner, bot lain, user yang sudah ter-ban global
+    (pergi-nya user ter-ban tidak perlu catatan terpisah).
     """
     ts = time.time() if ts is None else ts
     if chat.id == store.get_setting("log_group_id"):
@@ -421,9 +467,8 @@ async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = 
     store.record_encounter(user.id, full_name_of(user), getattr(user, "username", None),
                            ts=ts, is_premium=getattr(user, "is_premium", None),
                            language_code=getattr(user, "language_code", None))
-    # Kalau dia keluar di tengah verifikasi grup, pesan verifikasinya di
-    # grup itu sudah tidak berguna: hapus, dan pending-nya ditutup (dia
-    # sudah di-ban dari target ini, tidak ada lagi yang perlu ditunggu).
+    # Sisa sistem lama: kalau dia masih punya pesan prompt verifikasi grup
+    # yang menggantung, hapus dan tutup pending-nya (sudah tidak berguna).
     try:
         for pending in store.list_pendings(user.id):
             if pending.get("chat_id") == chat.id:
@@ -432,21 +477,33 @@ async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = 
     except Exception as exc:
         log.debug("Bersihkan pending saat %s keluar dari %s gagal: %s",
                   user.id, chat.id, exc)
-    store.mark_left_ban(user.id, chat.id, ts)
-    try:
-        await bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
-    except Exception as exc:
-        log.warning("Gagal auto-ban %s sesudah keluar dari %s: %s", user.id, chat.id, exc)
     target = store.get_target(chat.id) or {"_id": chat.id, "title": str(chat.id)}
-    await send_ban_report(
-        bot, store, owner_id,
-        "🚪 <b>Keluar → otomatis di-ban dari target</b>",
-        user.id,
-        extra=(f"🎯 Target asal: {_esc(target.get('title') or chat.id)}\n"
-               "User ini tidak bisa join lagi ke target tersebut "
-               "(sampai owner menjalankan /unban)."),
-        ts=ts, kind="keluar")
-    return "left_banned"
+    if leave_ban_enabled(store):
+        store.mark_left_ban(user.id, chat.id, ts)
+        try:
+            await bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+        except Exception as exc:
+            log.warning("Gagal ban %s yang keluar dari %s: %s",
+                        user.id, chat.id, exc)
+        await send_ban_report(
+            bot, store, owner_id,
+            "🚪 <b>Keluar → otomatis di-ban dari target</b>",
+            user.id,
+            extra=f"🎯 Target asal: {_esc(target.get('title') or chat.id)}",
+            ts=ts, kind="keluar")
+        return "left_banned"
+    text = "\n".join([
+        "🚪 <b>Member Keluar dari Target</b>",
+        "",
+        _user_block(store, user.id),
+        "",
+        f"🎯 Target asal: {_esc(target.get('title') or chat.id)}",
+        "ℹ️ User ini TIDAK di-ban — bebas join lagi kapan pun; "
+        "ini hanya catatan keluar.",
+        f"\n🕒 Waktu: {_now_str(ts)}",
+    ])
+    await send_ban_log(bot, store, owner_id, text, kind="keluar")
+    return "left_logged"
 
 
 def parse_export_file(text: str, file_name: str = "") -> dict:
@@ -498,8 +555,8 @@ def parse_export_file(text: str, file_name: str = "") -> dict:
 async def _gateway_for_target(bot, store, user, target: dict):
     if store.is_banned(user.id):
         return "banned"  # senyap: tanpa balasan apa pun (permintaan owner)
-    if store.has_left_ban(user.id, target["_id"]):
-        return "banned"  # ban-keluar di target ini: senyap juga, jangan dikasih jalan masuk
+    if leave_ban_enabled(store) and store.has_left_ban(user.id, target["_id"]):
+        return "banned"  # ban-keluar di target ini (saklar ON): senyap juga
     # Mode tanpa verifikasi: tombol masuk langsung dikirim, tanpa langkah apa pun.
     await send_gateway_entry(bot, store, user.id, target)
     return "entry_sent"
@@ -815,9 +872,10 @@ async def send_log(bot, store, owner_id: int, user_id: int, target: dict,
             await flush_unpaired_logs(bot, store)
         return True
 
-    # protect_content: log berisi data member — cegah diteruskan/disalin
-    # keluar dari grup log oleh siapa pun yang bisa melihatnya.
-    base = {"chat_id": log_group_id, "protect_content": True}
+    # Log SENGAJA tidak dilindungi protect_content (keputusan owner
+    # 2026-11-15 malam): grup log pribadi milik owner, isinya data dia
+    # sendiri — log harus bisa diteruskan/disalin bebas.
+    base = {"chat_id": log_group_id}
     if thread_id:
         base["message_thread_id"] = thread_id
 
@@ -889,8 +947,7 @@ async def flush_unpaired_logs(bot, store) -> int:
             document=io.BytesIO(content.encode("utf-8")),
             filename=f"log-tanpa-topik-{stamp}.txt",
             caption=(f"📄 Kumpulan log verifikasi dari target yang belum punya "
-                     f"topik sendiri — {len(entries)} catatan."),
-            protect_content=True)
+                     f"topik sendiri — {len(entries)} catatan."))
     except Exception as exc:
         log.warning("Gagal kirim file log tanpa topik: %s", exc)
         return 0
@@ -932,10 +989,10 @@ BAN_TOPIC_DEFS = [
      ["⛔", "🚫", "👮‍♂️", "👮"],
      "Catatan ban global: ban manual, unban, sapuan daftar ban, dan upaya "
      "join user ter-ban global yang digagalkan."),
-    ("leaveban_thread_id", "Log Ban Keluar",
-     ["🚪", "⛔", "🚫"],
-     "Catatan ban-karena-keluar dari SEMUA target jadi satu di sini: member "
-     "keluar sendiri yang otomatis di-ban + upaya joinnya yang digagalkan."),
+    ("leaveban_thread_id", "Log Keluar",
+     ["🚪", "📤", "⛔", "🚫"],
+     "Catatan member keluar dari SEMUA target jadi satu di sini. Member "
+     "yang keluar TIDAK di-ban — bebas join lagi; ini hanya catatan."),
     ("fileban_thread_id", "File Ban Global",
      ["📁", "🗂️", "📄", "💾"],
      "File sapuan daftar ban global tiap bot jadi admin di target baru "
@@ -1077,14 +1134,15 @@ async def handle_join_request(bot, store, owner_id: int, chat, user,
             ts=ts)
         return "banned"
 
-    if store.has_left_ban(user.id, chat.id):
+    if leave_ban_enabled(store) and store.has_left_ban(user.id, chat.id):
         try:
             await _call_with_retry(
                 lambda: bot.decline_chat_join_request(chat_id=chat.id,
                                                       user_id=user.id),
                 f"decline join request user ban-keluar {user.id}")
         except Exception as exc:
-            log.warning("Gagal decline join request user ban-keluar %s: %s", user.id, exc)
+            log.warning("Gagal decline join request user ban-keluar %s: %s",
+                        user.id, exc)
         await send_ban_report(
             bot, store, owner_id,
             "🛡 <b>Upaya join user ban-keluar digagalkan</b> (pernah keluar dari target ini)",
@@ -1124,7 +1182,8 @@ async def handle_direct_join(bot, store, owner_id: int, chat, user,
     """Proses member yang langsung jadi member: diterima penuh, data dicatat.
 
     Mode tanpa verifikasi — tidak ada restrict / pesan verifikasi / deadline.
-    Pengecualian cuma user ter-ban (global / ban-keluar), yang di-ban lagi.
+    Pengecualian: user ter-ban global (di-ban lagi), dan — hanya bila
+    saklar ban-keluar ON — user yang pernah keluar dari target ini.
     """
     ts = time.time() if ts is None else ts
     chat_type = getattr(chat, "type", "")
@@ -1154,13 +1213,14 @@ async def handle_direct_join(bot, store, owner_id: int, chat, user,
             ts=ts)
         return "banned"
 
-    if store.has_left_ban(user.id, chat.id):
+    if leave_ban_enabled(store) and store.has_left_ban(user.id, chat.id):
         try:
             await _call_with_retry(
                 lambda: bot.ban_chat_member(chat_id=chat.id, user_id=user.id),
                 f"ban ulang user ban-keluar {user.id}@{chat.id}")
         except Exception as exc:
-            log.warning("Gagal ban ulang user ban-keluar %s di %s: %s", user.id, chat.id, exc)
+            log.warning("Gagal ban ulang user ban-keluar %s di %s: %s",
+                        user.id, chat.id, exc)
         await send_ban_report(
             bot, store, owner_id,
             "🛡 <b>Upaya join user ban-keluar digagalkan</b> (pernah keluar dari target ini)",

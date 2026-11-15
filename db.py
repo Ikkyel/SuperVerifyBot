@@ -51,7 +51,7 @@ def format_history_block(user_id: int, history_doc) -> str:
     """Blok riwayat persis format yang diminta owner; entri terbaru di atas."""
     names = (history_doc or {}).get("names", [])
     usernames = (history_doc or {}).get("usernames", [])
-    lines = [f"👤 Riwayat untuk {user_id}", "Nama:"]
+    lines = [f"👤 Riwayat untuk <code>{user_id}</code>", "Nama:"]
     for entry in reversed(names):
         lines.append(f"[{fmt_ts(entry['ts'])}] {html.escape(str(entry['name']))}")
     lines.append("Nama Pengguna:")
@@ -244,24 +244,21 @@ class Store:
 
     def import_bans(self, data: dict) -> dict:
         """Gabungkan data ban dari backup ke database bot ini (BUKAN menimpa
-        data lain): user ter-ban ditandai banned + datanya diperbarui,
-        catatan ban-karena-keluar ditambahkan. Mengembalikan ringkasan +
-        daftar yang harus ditegakkan ke target."""
+        data lain): user ter-ban ditandai banned + datanya diperbarui.
+        Catatan ban-karena-keluar di backup LAMA sengaja DIABAIKAN — fitur
+        ban-keluar sudah dicabut owner (2026-11-15), member keluar tidak
+        lagi di-ban. Mengembalikan ringkasan + daftar yang harus
+        ditegakkan ke target."""
         banned_users = data.get("banned_users") or []
         for doc in banned_users:
             doc = dict(doc)
             doc["banned"] = True
             self.users.update_one({"_id": doc["_id"]}, {"$set": doc}, upsert=True)
-        leave_bans = data.get("leave_bans") or []
-        for doc in leave_bans:
-            self.leave_bans.update_one({"_id": doc["_id"]}, {"$set": doc},
-                                       upsert=True)
         return {
             "banned_users": len(banned_users),
-            "leave_bans": len(leave_bans),
+            "leave_bans": 0,
             "banned_ids": [d["_id"] for d in banned_users],
-            "leave_ban_pairs": [(d["user_id"], d["chat_id"]) for d in leave_bans
-                                if "user_id" in d and "chat_id" in d],
+            "leave_ban_pairs": [],
         }
 
     def list_banned(self):
