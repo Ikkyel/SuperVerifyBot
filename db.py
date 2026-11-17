@@ -75,6 +75,7 @@ class Store:
         self.targets = db["targets"]
         self.settings = db["settings"]
         self.leave_bans = db["leave_bans"]
+        self.gateway_entries = db["gateway_entries"]
         self.admins = db["admins"]
         self.unpaired_logs = db["unpaired_logs"]
 
@@ -180,6 +181,27 @@ class Store:
         self.users.update_one({"_id": int(user_id)},
                               {"$set": {"gateway_target": None}})
 
+    # -------- penanda member yang masuk lewat link gerbang -------- #
+    # Dipakai saklar ban-keluar KHUSUS gerbang: bot perlu tahu member ini
+    # masuk lewat link terbitan bot (nama link "Verifikasi <user_id>")
+    # atau lewat jalur biasa, supaya aturan keluarnya bisa dibedakan.
+    def mark_gateway_entry(self, user_id: int, chat_id: int, ts: float = None):
+        ts = time.time() if ts is None else ts
+        self.gateway_entries.update_one(
+            {"_id": f"{int(user_id)}:{int(chat_id)}"},
+            {"$set": {"user_id": int(user_id), "chat_id": int(chat_id),
+                      "ts": ts}},
+            upsert=True,
+        )
+
+    def is_gateway_entry(self, user_id: int, chat_id: int) -> bool:
+        return self.gateway_entries.find_one(
+            {"_id": f"{int(user_id)}:{int(chat_id)}"}) is not None
+
+    def clear_gateway_entry(self, user_id: int, chat_id: int):
+        self.gateway_entries.delete_one(
+            {"_id": f"{int(user_id)}:{int(chat_id)}"})
+
     # ---------------- ban ---------------- #
     def set_banned(self, user_id: int, banned: bool, ts: float = None):
         ts = time.time() if ts is None else ts
@@ -265,14 +287,24 @@ class Store:
         return list(self.users.find({"banned": True}).sort("_id", 1))
 
     # ---------------- ban karena keluar (per target) ---------------- #
-    def mark_left_ban(self, user_id: int, chat_id: int, ts: float = None):
-        """Catat user di-ban dari SATU target karena keluar dari target itu."""
+    def mark_left_ban(self, user_id: int, chat_id: int, ts: float = None,
+                      origin: str = "biasa"):
+        """Catat user di-ban dari SATU target karena keluar dari target itu.
+
+        `origin` membedakan asal jalurnya: "gerbang" (masuk lewat link bot)
+        atau "biasa" — supaya mematikan satu saklar hanya mencabut ban dari
+        jalurnya sendiri. Catatan lama tanpa origin dianggap "biasa"."""
         ts = time.time() if ts is None else ts
         self.leave_bans.update_one(
             {"_id": f"{int(user_id)}:{int(chat_id)}"},
-            {"$set": {"user_id": int(user_id), "chat_id": int(chat_id), "ts": ts}},
+            {"$set": {"user_id": int(user_id), "chat_id": int(chat_id),
+                      "ts": ts, "origin": origin}},
             upsert=True,
         )
+
+    def remove_left_ban(self, user_id: int, chat_id: int):
+        self.leave_bans.delete_one(
+            {"_id": f"{int(user_id)}:{int(chat_id)}"})
 
     def has_left_ban(self, user_id: int, chat_id: int) -> bool:
         return self.leave_bans.find_one(

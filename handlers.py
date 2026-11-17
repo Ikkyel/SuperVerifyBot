@@ -186,10 +186,11 @@ HELP_TEXT = (
     "• /targets — daftar channel/grup yang dijaga bot + status pairing topik log-nya\n"
     "• /gerbang — daftar link gerbang semua target (link yang disebar ke user)\n"
     "• /daftarban — daftar user yang sedang di-ban global\n"
-    "• /bankeluar — saklar *ban-keluar* (chat pribadi): posisi awal OFF (member keluar "
-    "hanya dicatat, tidak di-ban); kalau dinyalakan, member yang keluar sendiri dari "
-    "target langsung di-ban dari target itu dan join lagi ditolak. Berlaku untuk "
-    "semua target sekaligus\n\n"
+    "• /bankeluar — saklar *ban-keluar* (chat pribadi): ada DUA saklar terpisah, "
+    "buat jalur biasa (/bankeluar on|off) dan jalur gerbang (/bankeluar gerbang "
+    "on|off); posisi awal keduanya OFF (member keluar hanya dicatat, tidak "
+    "di-ban). Saklar yang ON membuat member jalur itu yang keluar sendiri "
+    "langsung di-ban dari target itu dan join lagi ditolak\n\n"
     "*Perintah yang dipakai di dalam grup log:*\n"
     "• /setlog — jalankan di grup log untuk menetapkan grup itu sebagai tujuan log "
     "(cukup sekali, di General)\n"
@@ -228,16 +229,21 @@ HELP_TEXT = (
     "• /unban <id_user> — cabut semua ban user itu (termasuk ban-karena-keluar); "
     "user bergabung lagi sendiri sesudahnya\n\n"
     "*Backup & restore (khusus owner, chat pribadi):*\n"
-    "• /backup — bot mengirim file JSON berisi DATA BAN saja (daftar ban global + ban-karena-keluar)\n"
+    "• /backup — bot mengirim file JSON berisi DATA BAN GLOBAL saja\n"
     "• Pindah daftar ban ke bot lain: kirim file itu ke chat pribadi bot tujuan, lalu konfirmasi — "
     "daftar bannya digabung ke bot tujuan dan langsung diterapkan ke target-targetnya\n\n"
-    "*Alur user biasa (mode tanpa verifikasi):*\n"
-    "1. User membuka link gerbang target / link Request Admin Approval / join langsung.\n"
-    "2. User langsung diterima otomatis — TIDAK ada verifikasi nomor HP, tidak ada "
-    "pesan verifikasi, tidak ada batas waktu.\n"
+    "*Alur user biasa (mode campuran):*\n"
+    "1. Lewat LINK GERBANG (link hasil bot): user yang belum pernah terverifikasi "
+    "diminta kirim nomor HP-nya dulu — cukup SEKALI per user, sesudahnya masuk "
+    "lewat link bot mana pun langsung dapat tombol masuk.\n"
+    "2. Lewat link Request Admin Approval biasa / join langsung: user langsung "
+    "diterima otomatis, tanpa verifikasi nomor HP dan tanpa batas waktu.\n"
     "3. Data membernya (nama, username, ID, foto profil, bio, status Premium, "
-    "bahasa, riwayat nama/username) tercatat di topik log target masing-masing.\n"
-    "4. Member yang keluar sendiri dari target otomatis di-ban dari target itu.\n"
+    "bahasa, riwayat nama/username — plus nomor HP bila ia pernah verifikasi "
+    "gerbang) tercatat di topik log target masing-masing.\n"
+    "4. Member yang keluar sendiri dari target cuma dicatat ke log keluar; "
+    "ia baru di-ban dari target itu bila saklar /bankeluar JALURNYA (biasa / "
+    "gerbang) lagi ON.\n"
     "5. User yang ter-ban global tetap ditolak/di-ban di semua jalur join.\n\n"
     "_Daftarkan link invite mentah sebuah target: kirim link-nya ke chat pribadi bot, "
     "bot akan membalas link gerbangnya._"
@@ -664,48 +670,68 @@ async def tempel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Backup / restore (KHUSUS owner)                                              #
 # --------------------------------------------------------------------------- #
 
+def _toggle_status(on: bool) -> str:
+    return ("🟢 *ON* — yang keluar sendiri langsung di-ban dari target itu, "
+            "dan join lagi ke sana ditolak."
+            if on else
+            "🔴 *OFF* — yang keluar sendiri TIDAK di-ban; bot hanya mencatat "
+            "keluarnya ke log keluar.")
+
+
 def _bankeluar_status_text(store) -> str:
-    if service.leave_ban_enabled(store):
-        status = ("🟢 *ON* — member yang keluar sendiri dari sebuah target langsung "
-                  "di-ban dari target itu, dan join lagi ke sana ditolak.")
-    else:
-        status = ("🔴 *OFF* — member yang keluar sendiri TIDAK di-ban; bot hanya "
-                  "mencatat keluarnya ke log keluar.")
     return ("🚪 *Ban-Keluar* (keluar sendiri = di-ban dari target)\n\n"
-            f"Status sekarang: {status}\n\n"
-            "Saklar ini berlaku untuk SEMUA target sekaligus dan langsung "
-            "berlaku tanpa restart. Mematikan saklar (dari ON ke OFF) "
-            "otomatis mencabut semua ban-keluar yang dipasang bot — user "
-            "yang ter-ban global tidak ikut dilepas. Catatan ban-keluar "
-            "yang terlanjur dicabut tidak kembali — saklar hanya berlaku "
-            "untuk yang keluar setelah dinyalakan.")
+            "Ada *dua saklar terpisah* — aturannya mengikuti jalur masuk "
+            "membernya:\n\n"
+            f"• *Jalur biasa* (link acc / join langsung): "
+            f"{_toggle_status(service.leave_ban_enabled(store))}\n"
+            f"• *Jalur gerbang* (masuk lewat link bot): "
+            f"{_toggle_status(service.gateway_leave_ban_enabled(store))}\n\n"
+            "Tiap saklar berlaku untuk SEMUA target di jalurnya dan "
+            "langsung berlaku tanpa restart. Mematikan saklar (dari ON ke "
+            "OFF) otomatis mencabut ban-keluar *di jalur itu saja* yang "
+            "dipasang bot — user yang ter-ban global tidak ikut dilepas. "
+            "Catatan ban-keluar yang terlanjur dicabut tidak kembali — "
+            "saklar hanya berlaku untuk yang keluar setelah dinyalakan.")
 
 
 def _bankeluar_keyboard(store) -> InlineKeyboardMarkup:
     if service.leave_ban_enabled(store):
-        toggle = InlineKeyboardButton("🔴 Matikan ban-keluar", callback_data="bk:off")
+        biasa = InlineKeyboardButton("🔴 Matikan ban-keluar BIASA",
+                                     callback_data="bk:off")
     else:
-        toggle = InlineKeyboardButton("🟢 Nyalakan ban-keluar", callback_data="bk:on")
+        biasa = InlineKeyboardButton("🟢 Nyalakan ban-keluar BIASA",
+                                     callback_data="bk:on")
+    if service.gateway_leave_ban_enabled(store):
+        gerbang = InlineKeyboardButton("🔴 Matikan ban-keluar GERBANG",
+                                       callback_data="bg:off")
+    else:
+        gerbang = InlineKeyboardButton("🟢 Nyalakan ban-keluar GERBANG",
+                                       callback_data="bg:on")
     return InlineKeyboardMarkup([
-        [toggle],
+        [biasa],
+        [gerbang],
         [InlineKeyboardButton("⬅️ Dasbor", callback_data="dash:home")],
     ])
 
 
-async def _set_bankeluar(context: ContextTypes.DEFAULT_TYPE, store, on: bool):
-    """Ubah saklar ban-keluar; kembalikan catatan hasil (string, bisa kosong).
+async def _set_leave_ban_switch(context: ContextTypes.DEFAULT_TYPE, store,
+                                on: bool, *, setting: str, enabled_fn,
+                                origin: str, label: str):
+    """Ubah satu saklar ban-keluar; kembalikan catatan hasil (bisa kosong).
 
-    Perpindahan ON -> OFF sekalian MEMBERSIHKAN: semua catatan ban-keluar
-    dihapus + ban Telegram yang dipasang bot dilepas (permintaan owner
-    2026-11-15 malam) — kecuali user ter-ban global, yang tidak dilepas.
+    Perpindahan ON -> OFF sekalian MEMBERSIHKAN ban-keluar DI JALUR ITU
+    SAJA: catatan dihapus + ban Telegram yang dipasang bot dilepas
+    (permintaan owner 2026-11-15 malam) — kecuali user ter-ban global,
+    yang tidak dilepas. Jalur satunya tidak disentuh sama sekali.
     """
-    was_on = service.leave_ban_enabled(store)
-    store.set_setting("leave_ban_enabled", bool(on))
+    was_on = enabled_fn(store)
+    store.set_setting(setting, bool(on))
     note = ""
     cleared = None
     if was_on and not on:
         try:
-            cleared = await service.clear_leave_bans(context.bot, store)
+            cleared = await service.clear_leave_bans(context.bot, store,
+                                                     origin=origin)
         except Exception:
             cleared = None
         if cleared and cleared.get("cleared"):
@@ -715,28 +741,49 @@ async def _set_bankeluar(context: ContextTypes.DEFAULT_TYPE, store, on: bool):
     try:
         await service.send_ban_log(
             context.bot, store, _owner_id(context),
-            ("🟢 <b>Ban-keluar DINYALAKAN</b> — mulai sekarang member yang "
-             "keluar sendiri dari target akan di-ban dari target itu."
+            (f"🟢 <b>Ban-keluar {label} DINYALAKAN</b> — mulai sekarang "
+             f"member jalur itu yang keluar sendiri dari target akan "
+             f"di-ban dari target itu."
              if on else
-             "🔴 <b>Ban-keluar DIMATIKAN</b> — mulai sekarang member yang "
-             "keluar sendiri dari target TIDAK di-ban, hanya dicatat."
-             + (f" Semua ban-keluar yang dipasang bot dicabut sekalian "
-                f"({cleared['cleared']} catatan dihapus, {cleared['unbanned']} "
-                "ban dilepas)." if cleared and cleared.get("cleared") else "")),
+             f"🔴 <b>Ban-keluar {label} DIMATIKAN</b> — mulai sekarang "
+             f"member jalur itu yang keluar sendiri dari target TIDAK "
+             f"di-ban, hanya dicatat."
+             + (f" Semua ban-keluar jalur itu yang dipasang bot dicabut "
+                f"sekalian ({cleared['cleared']} catatan dihapus, "
+                f"{cleared['unbanned']} ban dilepas)."
+                if cleared and cleared.get("cleared") else "")),
             kind="keluar")
     except Exception:
         pass  # pencatatan saklar bersifat tambahan; jangan gagalkan perintah
     return note
 
 
+async def _set_bankeluar(context: ContextTypes.DEFAULT_TYPE, store, on: bool):
+    """Saklar ban-keluar JALUR BIASA."""
+    return await _set_leave_ban_switch(
+        context, store, on, setting="leave_ban_enabled",
+        enabled_fn=service.leave_ban_enabled, origin="biasa",
+        label="JALUR BIASA")
+
+
+async def _set_bangerbang(context: ContextTypes.DEFAULT_TYPE, store, on: bool):
+    """Saklar ban-keluar JALUR GERBANG (masuk lewat link bot)."""
+    return await _set_leave_ban_switch(
+        context, store, on, setting="gateway_leave_ban_enabled",
+        enabled_fn=service.gateway_leave_ban_enabled, origin="gerbang",
+        label="JALUR GERBANG")
+
+
 async def bankeluar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update, context) or update.effective_chat.type != ChatType.PRIVATE:
         return
     store = _store(context)
-    args = context.args or []
+    args = [a.lower() for a in (context.args or [])]
     note = ""
-    if args and args[0].lower() in ("on", "off"):
-        note = await _set_bankeluar(context, store, args[0].lower() == "on")
+    if args and args[0] in ("on", "off"):
+        note = await _set_bankeluar(context, store, args[0] == "on")
+    elif len(args) >= 2 and args[0] == "gerbang" and args[1] in ("on", "off"):
+        note = await _set_bangerbang(context, store, args[1] == "on")
     await update.message.reply_text(
         _bankeluar_status_text(store) + note, parse_mode="Markdown",
         reply_markup=_bankeluar_keyboard(store))
@@ -750,7 +797,21 @@ async def bankeluar_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     store = _store(context)
     on = query.data == "bk:on"
     note = await _set_bankeluar(context, store, on)
-    await query.answer("Ban-keluar " + ("dinyalakan 🟢" if on else "dimatikan 🔴"))
+    await query.answer("Ban-keluar biasa " + ("dinyalakan 🟢" if on else "dimatikan 🔴"))
+    await query.edit_message_text(
+        _bankeluar_status_text(store) + note, parse_mode="Markdown",
+        reply_markup=_bankeluar_keyboard(store))
+
+
+async def bangerbang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(update, context):
+        await query.answer("Khusus admin bot.", show_alert=True)
+        return
+    store = _store(context)
+    on = query.data == "bg:on"
+    note = await _set_bangerbang(context, store, on)
+    await query.answer("Ban-keluar gerbang " + ("dinyalakan 🟢" if on else "dimatikan 🔴"))
     await query.edit_message_text(
         _bankeluar_status_text(store) + note, parse_mode="Markdown",
         reply_markup=_bankeluar_keyboard(store))
@@ -765,7 +826,9 @@ def _dashboard_text(store) -> str:
                if t["_id"] != store.get_setting("log_group_id")]
     log_status = ("terpasang ✅" if store.get_setting("log_group_id")
                   else "BELUM dipasang ⚠️")
-    bk = "🟢 ON" if service.leave_ban_enabled(store) else "🔴 OFF"
+    bk = ("biasa " + ("🟢 ON" if service.leave_ban_enabled(store) else "🔴 OFF")
+          + " · gerbang "
+          + ("🟢 ON" if service.gateway_leave_ban_enabled(store) else "🔴 OFF"))
     return (
         "🛡️ <b>Dasbor Bot Security</b>\n\n"
         "📊 <b>Ringkasan:</b>\n"
@@ -822,7 +885,9 @@ def _dash_targets_view(store, bot_username: str):
 
 
 def _dash_ban_view(store):
-    bk = "🟢 ON" if service.leave_ban_enabled(store) else "🔴 OFF"
+    bk = ("biasa " + ("🟢 ON" if service.leave_ban_enabled(store) else "🔴 OFF")
+          + " · gerbang "
+          + ("🟢 ON" if service.gateway_leave_ban_enabled(store) else "🔴 OFF"))
     text = (
         "🚫 <b>Ban &amp; Admin</b>\n\n"
         f"🚪 Ban-keluar sekarang: <b>{bk}</b>\n"
@@ -1075,6 +1140,19 @@ async def _dash_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await query.answer("Berhasil ✅")
     await _dash_edit(query, result,
                      InlineKeyboardMarkup([_back_row("dash:ban")]))
+
+
+async def contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pesan kontak di DM: balasan atas prompt verifikasi nomor HP gerbang."""
+    store, user = _store(context), update.effective_user
+    message = update.effective_message
+    if not user or user.is_bot or not message or not message.contact:
+        return
+    store.record_encounter(user.id, service.full_name_of(user), user.username,
+                           is_premium=user.is_premium,
+                           language_code=user.language_code)
+    await service.handle_gateway_contact(context.bot, store, _owner_id(context),
+                                         user, message.contact)
 
 
 async def dash_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):

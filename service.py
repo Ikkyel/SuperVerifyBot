@@ -15,20 +15,26 @@ import re
 import time
 from datetime import datetime
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
+                      KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove)
 
-from db import WIB, display_username, format_history_block
+from db import WIB, display_username, format_history_block, validate_contact
 
 log = logging.getLogger("verifybot.service")
 
-# MODE TANPA VERIFIKASI (keputusan owner 2026-11-15): tidak ada lagi gerbang
-# nomor HP. Join request langsung di-approve, join langsung langsung diterima,
-# dan bot hanya MENCATAT data member (tanpa nomor HP) ke grup log. Yang tetap
-# ditegakkan: ban global (user ter-ban tetap ditolak di pintu). Member
+# MODE CAMPURAN (keputusan owner 2026-11-15 + 2026-11-17): jalur join biasa
+# TANPA verifikasi — join request langsung di-approve, join langsung langsung
+# diterima, bot hanya MENCATAT data member (tanpa nomor HP) ke grup log.
+# SATU pengecualian: link GERBANG (link hasil bot) memakai verifikasi nomor
+# HP — user yang membuka link gerbang dan belum pernah terverifikasi diminta
+# mengirim nomor HP-nya sendiri dulu (cukup SEKALI per user; nomor tersimpan,
+# klik gerbang berikutnya langsung dapat tombol masuk). Yang tetap ditegakkan
+# di semua jalur: ban global (user ter-ban tetap ditolak di pintu). Member
 # keluar dari target DEFAULT-nya tidak di-ban — hanya dicatat ke log
-# keluar bersama; tapi ada saklar ban-keluar (/bankeluar, setting
-# leave_ban_enabled) yang bila dinyalakan owner mengembalikan perilaku
-# lama: keluar sendiri = otomatis di-ban dari target itu.
+# keluar bersama; tapi ada DUA saklar ban-keluar terpisah di /bankeluar
+# (jalur biasa: leave_ban_enabled; jalur gerbang: gateway_leave_ban_enabled)
+# yang bila saklar jalurnya dinyalakan owner mengembalikan perilaku lama
+# untuk jalur itu: keluar sendiri = otomatis di-ban dari target itu.
 
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
@@ -114,7 +120,8 @@ async def _revoke_minted_link(bot, chat_id: int, url, name):
 
 
 async def send_gateway_entry(bot, store, user_id: int, target: dict):
-    """Kirim tombol masuk ke target (langsung, tanpa verifikasi apa pun)."""
+    """Kirim tombol masuk ke target (user sudah lolos gerbang: terverifikasi
+    nomor HP, atau owner/admin)."""
     title = target.get("title") or str(target["_id"])
     url = await make_entry_link(bot, store, target, user_id)
     if not url:
@@ -128,8 +135,26 @@ async def send_gateway_entry(bot, store, user_id: int, target: dict):
     await _send_dm(bot, user_id,
                    f"Tap tombol di bawah buat membuka *{_md_escape(title)}*, lalu tap "
                    f"*Minta Bergabung* di sana — permintaanmu langsung disetujui "
-                   f"otomatis dalam hitungan detik, tanpa verifikasi apa pun.",
+                   f"otomatis dalam hitungan detik.",
                    parse_mode="Markdown", reply_markup=markup, protect_content=True)
+    return True
+
+
+async def send_gateway_verify_prompt(bot, store, user_id: int, target: dict):
+    """Minta verifikasi nomor HP (sekali per user) sebelum tombol masuk
+    gerbang diberikan. Target tujuan disimpan di user (gateway_target)."""
+    title = target.get("title") or str(target["_id"])
+    markup = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Kirim Nomor HP", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True)
+    await _send_dm(bot, user_id,
+                   f"🔐 *Verifikasi sekali aja*\n\n"
+                   f"Buat masuk ke *{_md_escape(title)}* lewat link ini, tap tombol "
+                   f"*📱 Kirim Nomor HP* di bawah buat verifikasi nomor HP kamu.\n\n"
+                   f"Cuma sekali ini aja kok — sesudahnya kamu bisa masuk lewat link "
+                   f"bot mana pun tanpa ditanya lagi. Nomor kamu cuma dicatat admin "
+                   f"buat keamanan, nggak disebar ke siapa pun.",
+                   parse_mode="Markdown", reply_markup=markup)
     return True
 
 
@@ -202,41 +227,60 @@ def is_admin_id(store, owner_id: int, user_id: int) -> bool:
 
 
 def leave_ban_enabled(store) -> bool:
-    """Saklar ban-keluar (diatur owner via /bankeluar). Default OFF:
-    member keluar hanya dicatat. ON: keluar sendiri = di-ban dari target
-    itu dan join lagi ditolak di semua jalur (perilaku lama)."""
+    """Saklar ban-keluar JALUR BIASA (diatur owner via /bankeluar).
+    Default OFF: member keluar hanya dicatat. ON: keluar sendiri = di-ban
+    dari target itu dan join lagi ditolak di semua jalur (perilaku lama)."""
     return bool(store.get_setting("leave_ban_enabled", False))
 
 
-async def clear_leave_bans(bot, store) -> dict:
-    """Migrasi pencabutan ban-keluar (keputusan owner 2026-11-15 malam):
-    hapus SEMUA catatan ban-keluar lama + lepas ban Telegram yang pernah
-    dipasang BOT di target terkait (saat member keluar / saat upaya join
-    user ban-keluar digagalkan). Ban global TIDAK disentuh sama sekali;
-    ban yang bukan dipasang bot juga tidak disentuh (bot memang tidak
-    punya catatannya). Idempoten: sesudah bersih, pemanggilan berikutnya
-    tidak melakukan apa-apa. Dijalankan otomatis saat bot start."""
+def gateway_leave_ban_enabled(store) -> bool:
+    """Saklar ban-keluar KHUSUS JALUR GERBANG (keputusan owner 2026-11-17):
+    hanya mengatur member yang masuk lewat link terbitan bot. Default OFF,
+    terpisah dari saklar jalur biasa — keduanya bisa ON/OFF sendiri-sendiri."""
+    return bool(store.get_setting("gateway_leave_ban_enabled", False))
+
+
+def _is_gateway_link_name(link_name) -> bool:
+    """Link terbitan gerbang selalu bernama "Verifikasi <user_id>" — baik
+    tipe acc maupun sekali-pakai; link lain (mentah/utama) tidak bernama
+    begitu, jadi penanda ini tidak pernah salah tunjuk."""
+    return bool(link_name) and str(link_name).startswith("Verifikasi ")
+
+
+async def clear_leave_bans(bot, store, origin: str = None) -> dict:
+    """Pencabutan ban-keluar yang dipasang BOT (keputusan owner 2026-11-15
+    malam): hapus catatan ban-keluar + lepas ban Telegram-nya di target
+    terkait. Ban global TIDAK disentuh (user ter-ban global catatannya
+    dihapus tapi ban Telegram-nya TIDAK dilepas); ban yang bukan dipasang
+    bot juga tidak disentuh (bot memang tidak punya catatannya).
+
+    `origin` menyaring jalur: None = semua jalur (migrasi sekali jalan
+    saat bot start); "biasa" / "gerbang" = hanya catatan dari jalur itu
+    (dipakai saat saklar jalur itu dimatikan — saklar lain tidak ikut
+    dibersihkan). Catatan lama tanpa origin dianggap "biasa". Idempoten."""
     records = (store.export_bans() or {}).get("leave_bans") or []
+    if origin is not None:
+        records = [r for r in records
+                   if (r.get("origin") or "biasa") == origin]
     unbanned = 0
+    cleared = 0
     for rec in records:
         user_id, chat_id = rec.get("user_id"), rec.get("chat_id")
         if user_id is None or chat_id is None:
             continue
-        if store.is_banned(user_id):
-            continue  # ter-ban global: jangan dilepas di target mana pun
-        try:
-            await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
-            unbanned += 1
-        except Exception as exc:
-            log.debug("Lepas ban-keluar %s di %s gagal: %s",
-                      user_id, chat_id, exc)
-    for user_id in {rec.get("user_id") for rec in records}:
-        if user_id is not None:
-            store.clear_left_bans(user_id)
-    if records:
-        log.info("Migrasi ban-keluar: %s catatan dihapus, %s ban Telegram "
-                 "dilepas.", len(records), unbanned)
-    return {"cleared": len(records), "unbanned": unbanned}
+        if not store.is_banned(user_id):
+            try:
+                await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+                unbanned += 1
+            except Exception as exc:
+                log.debug("Lepas ban-keluar %s di %s gagal: %s",
+                          user_id, chat_id, exc)
+        store.remove_left_ban(user_id, chat_id)
+        cleared += 1
+    if cleared:
+        log.info("Pencabutan ban-keluar (origin=%s): %s catatan dihapus, "
+                 "%s ban Telegram dilepas.", origin, cleared, unbanned)
+    return {"cleared": cleared, "unbanned": unbanned}
 
 
 async def apply_blacklist(bot, store, chat_id: int):
@@ -448,11 +492,15 @@ async def send_ban_report(bot, store, owner_id: int, title: str, user_id: int,
 async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = None):
     """Member keluar sendiri dari target.
 
-    Saklar ban-keluar OFF (default, keputusan owner 2026-11-15 malam):
-    user TIDAK di-ban — bebas join lagi kapan pun; bot hanya MENCATAT
-    peristiwa keluarnya ke topik log keluar bersama. Saklar ON
-    (/bankeluar): perilaku lama — user langsung di-ban dari target itu
-    + laporan lengkap ke topik yang sama.
+    Aturan ban-keluar DIBEDAKAN per jalur masuk (keputusan owner
+    2026-11-17): member yang masuk lewat link GERBANG mengikuti saklar
+    `gateway_leave_ban_enabled`, member jalur biasa mengikuti saklar
+    `leave_ban_enabled`. Saklar jalurnya OFF (default keduanya): user
+    TIDAK di-ban — bebas join lagi kapan pun; bot hanya MENCATAT
+    peristiwa keluarnya ke topik log keluar bersama. Saklar jalurnya ON:
+    user langsung di-ban dari target itu + laporan lengkap ke topik
+    yang sama. Penanda jalur masuk dibaca lalu dihapus di sini — join
+    berikutnya menandai ulang sesuai link yang dipakai saat itu.
 
     Dilewati: grup log, owner, bot lain, user yang sudah ter-ban global
     (pergi-nya user ter-ban tidak perlu catatan terpisah).
@@ -460,6 +508,8 @@ async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = 
     ts = time.time() if ts is None else ts
     if chat.id == store.get_setting("log_group_id"):
         return "skip_log_group"
+    via_gateway = store.is_gateway_entry(user.id, chat.id)
+    store.clear_gateway_entry(user.id, chat.id)
     if is_admin_id(store, owner_id, user.id) or getattr(user, "is_bot", False):
         return "skip"
     if store.is_banned(user.id):
@@ -478,8 +528,12 @@ async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = 
         log.debug("Bersihkan pending saat %s keluar dari %s gagal: %s",
                   user.id, chat.id, exc)
     target = store.get_target(chat.id) or {"_id": chat.id, "title": str(chat.id)}
-    if leave_ban_enabled(store):
-        store.mark_left_ban(user.id, chat.id, ts)
+    jalur = "Gerbang (link bot)" if via_gateway else "Biasa (link acc / langsung)"
+    ban_on = (gateway_leave_ban_enabled(store) if via_gateway
+              else leave_ban_enabled(store))
+    if ban_on:
+        store.mark_left_ban(user.id, chat.id, ts,
+                            origin="gerbang" if via_gateway else "biasa")
         try:
             await bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
         except Exception as exc:
@@ -489,7 +543,8 @@ async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = 
             bot, store, owner_id,
             "🚪 <b>Keluar → otomatis di-ban dari target</b>",
             user.id,
-            extra=f"🎯 Target asal: {_esc(target.get('title') or chat.id)}",
+            extra=(f"🎯 Target asal: {_esc(target.get('title') or chat.id)}\n"
+                   f"🚪 Jalur masuk: {_esc(jalur)}"),
             ts=ts, kind="keluar")
         return "left_banned"
     text = "\n".join([
@@ -498,6 +553,7 @@ async def handle_member_left(bot, store, owner_id: int, chat, user, ts: float = 
         _user_block(store, user.id),
         "",
         f"🎯 Target asal: {_esc(target.get('title') or chat.id)}",
+        f"🚪 Jalur masuk: {_esc(jalur)}",
         "ℹ️ User ini TIDAK di-ban — bebas join lagi kapan pun; "
         "ini hanya catatan keluar.",
         f"\n🕒 Waktu: {_now_str(ts)}",
@@ -552,14 +608,52 @@ def parse_export_file(text: str, file_name: str = "") -> dict:
     return {"title": title, "intro": intro, "entries": entries}
 
 
-async def _gateway_for_target(bot, store, user, target: dict):
+async def _gateway_for_target(bot, store, user, target: dict, owner_id: int = 0):
     if store.is_banned(user.id):
         return "banned"  # senyap: tanpa balasan apa pun (permintaan owner)
     if leave_ban_enabled(store) and store.has_left_ban(user.id, target["_id"]):
         return "banned"  # ban-keluar di target ini (saklar ON): senyap juga
-    # Mode tanpa verifikasi: tombol masuk langsung dikirim, tanpa langkah apa pun.
+    # Link gerbang memakai verifikasi nomor HP SEKALI per user (keputusan
+    # owner 2026-11-17) — owner/admin bebas, user yang sudah terverifikasi
+    # langsung dapat tombol masuk.
+    if not is_admin_id(store, owner_id, user.id) and not store.is_verified(user.id):
+        store.set_user_gateway(user.id, target["_id"])
+        await send_gateway_verify_prompt(bot, store, user.id, target)
+        return "verify_prompt"
     await send_gateway_entry(bot, store, user.id, target)
     return "entry_sent"
+
+
+async def handle_gateway_contact(bot, store, owner_id: int, user, contact):
+    """User mengirim kontak (balasan atas prompt verifikasi gerbang).
+
+    Nomor harus nomor user SENDIRI. Lolos → nomor disimpan (terverifikasi),
+    target tujuan gerbang dibaca dari catatan user, tombol masuk dikirim
+    lewat _gateway_for_target (cek ban tetap jalan di sana).
+    """
+    if store.is_banned(user.id):
+        return "banned"  # senyap total, nomor pun tidak disimpan
+    if not validate_contact(user.id, getattr(contact, "user_id", None)):
+        await _send_dm(bot, user.id,
+                       "⚠️ Itu bukan nomor HP kamu sendiri. Kirim nomormu pakai "
+                       "tombol *📱 Kirim Nomor HP* di bawah pesan verifikasi ya — "
+                       "ketik manual atau kirim kontak orang lain nggak bisa.",
+                       parse_mode="Markdown")
+        return "not_own"
+    store.mark_verified(user.id, getattr(contact, "phone_number", "") or "")
+    target_id = store.get_user_gateway(user.id)
+    store.clear_user_gateway(user.id)
+    await _send_dm(bot, user.id,
+                   "✅ *Nomor HP terverifikasi!* Makasih ya — nomor kamu udah "
+                   "kecatat, jadi seterusnya masuk lewat link bot langsung bisa, "
+                   "nggak ditanya lagi.",
+                   parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    if target_id is None:
+        return "verified"
+    target = store.get_target(target_id)
+    if target is None:
+        return "verified"
+    return await _gateway_for_target(bot, store, user, target, owner_id)
 
 
 async def handle_gateway_start(bot, store, owner_id: int, user, code: str,
@@ -568,7 +662,7 @@ async def handle_gateway_start(bot, store, owner_id: int, user, code: str,
     target = target_for_code(store, code or "")
     if target is None:
         return "unknown"
-    return await _gateway_for_target(bot, store, user, target)
+    return await _gateway_for_target(bot, store, user, target, owner_id)
 
 
 async def handle_gateway_pick(bot, store, owner_id: int, user, chat_id: int,
@@ -577,7 +671,7 @@ async def handle_gateway_pick(bot, store, owner_id: int, user, chat_id: int,
     target = store.get_target(chat_id)
     if target is None:
         return "unknown"
-    return await _gateway_for_target(bot, store, user, target)
+    return await _gateway_for_target(bot, store, user, target, owner_id)
 
 
 async def register_gateway_link(bot, store, owner_id: int, link: str,
@@ -809,6 +903,10 @@ def build_log_text(store, user_id: int, target: dict, event_label: str,
         f"💎 Premium: {'Ya' if user.get('is_premium') else 'Tidak'}",
         f"🗣 Bahasa: {_esc(user.get('language_code') or '-')}",
     ]
+    if user.get("phone"):
+        # Nomor cuma ada bila user pernah verifikasi lewat link gerbang —
+        # jalur join biasa memang tidak mencatat nomor (mode campuran).
+        lines.append(f"📱 Nomor HP: {_esc(user['phone'])}")
     if user.get("bio"):
         lines.append(f"📝 Bio: {_esc(user['bio'])}")
     lines += [
@@ -1169,6 +1267,10 @@ async def handle_join_request(bot, store, owner_id: int, chat, user,
     await send_log(bot, store, owner_id, user.id, target,
                    "Member baru (join request langsung di-approve)",
                    source, ts)
+    if _is_gateway_link_name(link_name):
+        # Masuk lewat link terbitan gerbang: tandai, supaya aturan
+        # ban-keluarnya mengikuti saklar khusus gerbang.
+        store.mark_gateway_entry(user.id, chat.id, ts)
     await _revoke_minted_link(bot, chat.id, link_url, link_name)
     return "approved"
 
@@ -1234,5 +1336,7 @@ async def handle_direct_join(bot, store, owner_id: int, chat, user,
     # hanya mencatat datanya ke log.
     await send_log(bot, store, owner_id, user.id, target,
                    "Member baru (join langsung)", source, ts)
+    if _is_gateway_link_name(link_name):
+        store.mark_gateway_entry(user.id, chat.id, ts)
     await _revoke_minted_link(bot, chat.id, link_url, link_name)
     return "logged"

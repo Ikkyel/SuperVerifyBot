@@ -1,14 +1,19 @@
 """Bot Security / Pencatat Member Telegram — titik masuk.
 
-MODE TANPA VERIFIKASI (keputusan owner 2026-11-15): satu bot menjaga banyak
-channel/grup private, dan:
+MODE CAMPURAN (keputusan owner 2026-11-15 + 2026-11-17): satu bot menjaga
+banyak channel/grup private, dan:
 - Jalur A (join request): langsung di-approve otomatis.
 - Jalur B (join langsung, mis. dari bot fsub): langsung diterima penuh.
-- Bot hanya MENCATAT data member (nama, username, ID, foto, bio, Premium,
-  bahasa, riwayat nama/username — TANPA nomor HP) ke topik grup forum per
-  target; target tanpa topik ditampung lalu dikeluarkan sebagai file .txt.
+- Link GERBANG (link hasil bot): verifikasi nomor HP SEKALI per user —
+  user belum terverifikasi diminta kirim nomor HP-nya dulu, baru dapat
+  tombol masuk; sesudahnya bebas.
+- Bot MENCATAT data member (nama, username, ID, foto, bio, Premium,
+  bahasa, riwayat nama/username — plus nomor HP bila ada) ke topik grup
+  forum per target; target tanpa topik ditampung lalu dikeluarkan sebagai
+  file .txt.
 - Penegakan yang tetap jalan: ban global (blokir senyap + ban semua target)
-  member keluar dari target hanya dicatat ke log keluar (tidak di-ban).
+  member keluar dari target hanya dicatat ke log keluar (tidak di-ban,
+  kecuali saklar /bankeluar lagi ON).
 
 Env: BOT_TOKEN, OWNER_ID, MONGODB_URI, LOG_GROUP_ID (opsional — bisa /setlog).
 """
@@ -64,7 +69,8 @@ async def _post_init(app: Application):
             store.set_setting("leave_ban_lifted_v1", True)
         except Exception as exc:
             log.warning("Migrasi pencabutan ban-keluar gagal: %s", exc)
-    log.info("Bot jalan (mode tanpa verifikasi). Target terdaftar: %s",
+    log.info("Bot jalan (mode campuran: gerbang verifikasi HP sekali, "
+             "jalur lain langsung). Target terdaftar: %s",
              len(store.list_targets()))
 
 
@@ -91,6 +97,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("daftarban", handlers.daftarban_cmd))
     app.add_handler(CommandHandler("bankeluar", handlers.bankeluar_cmd))
     app.add_handler(CallbackQueryHandler(handlers.bankeluar_cb, pattern=r"^bk:"))
+    app.add_handler(CallbackQueryHandler(handlers.bangerbang_cb, pattern=r"^bg:"))
     app.add_handler(CommandHandler("tambahadmin", handlers.tambahadmin_cmd))
     app.add_handler(CommandHandler("hapusadmin", handlers.hapusadmin_cmd))
     app.add_handler(CommandHandler("daftaradmin", handlers.daftaradmin_cmd))
@@ -102,6 +109,8 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(handlers.dashboard_cb, pattern=r"^dash"))
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.Document.ALL, handlers.restore_document))
+    app.add_handler(MessageHandler(
+        filters.CONTACT & filters.ChatType.PRIVATE, handlers.contact_message))
     app.add_handler(CommandHandler("setlog", handlers.setlog_cmd))
     app.add_handler(CommandHandler("buattopik", handlers.buattopik_cmd))
     app.add_handler(CommandHandler("pasang", handlers.pasang_cmd))
